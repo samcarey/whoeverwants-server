@@ -13,3 +13,4 @@ anyhow = "1.0.80"
 dotenv = "0.15.0"
 openapi = { path = "./openapi" }
 tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread"] }
+axum = "0.7"

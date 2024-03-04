@@ -1,4 +1,5 @@
 use anyhow::Result;
+use axum::{response::Html, routing::get, Router};
 use dotenv::dotenv;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -16,6 +17,7 @@ async fn main() -> Result<()> {
         )),
         ..Default::default()
     };
+
     let message_params = CreateMessageParams {
         account_sid: env::var("TWILIO_ACCOUNT_SID")?,
         to: env::var("CLIENT_NUMBER")?,
@@ -30,5 +32,26 @@ async fn main() -> Result<()> {
         }
         Err(error) => eprintln!("Error sending message: {}", error),
     };
+
+    let app = Router::new().route("/", get(handler).post(handler));
+
+    // run it
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:6010")
+        .await
+        .unwrap();
+    println!("listening on {}", listener.local_addr()?);
+    axum::serve(listener, app).await.unwrap();
+
     Ok(())
+}
+
+async fn handler() -> Html<&'static str> {
+    Html(
+        r#"
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Message>We got your message, thank you!</Message>
+</Response>
+    "#,
+    )
 }
