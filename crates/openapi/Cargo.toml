@@ -1,0 +1,16 @@
+[package]
+name = "openapi"
+version = "1.55.0"
+authors = ["support@twilio.com"]
+description = "This is the public Twilio REST API."
+license = "Apache 2.0"
+edition = "2018"
+
+[dependencies]
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_with = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }

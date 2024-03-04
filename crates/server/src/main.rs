@@ -1,5 +1,9 @@
 use anyhow::Result;
-use axum::{response::Html, routing::get, Router};
+use axum::{
+    response::{Html, IntoResponse},
+    routing::post,
+    Form, Router,
+};
 use dotenv::dotenv;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -33,7 +37,7 @@ async fn main() -> Result<()> {
         Err(error) => eprintln!("Error sending message: {}", error),
     };
 
-    let app = Router::new().route("/", get(handler).post(handler));
+    let app = Router::new().route("/", post(handle_incoming_sms));
 
     // run it
     let listener = tokio::net::TcpListener::bind(format!(
@@ -49,13 +53,20 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handler() -> Html<&'static str> {
-    Html(
+// Define a struct to deserialize the incoming form data
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SmsMessage {
+    body: String,
+}
+
+// Handler for incoming SMS messages
+async fn handle_incoming_sms(Form(SmsMessage { body }): Form<SmsMessage>) -> impl IntoResponse {
+    Html(format!(
         r#"
-<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Message>We got your message, thank you!</Message>
-</Response>
-    "#,
-    )
+        <?xml version="1.0" encoding="UTF-8"?>
+        <Response>
+        <Message>Thank you for your submission: {body}</Message>
+        </Response>
+        "#
+    ))
 }
