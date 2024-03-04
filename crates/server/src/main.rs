@@ -53,32 +53,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// field names must be exact (including case) to match API
 #[allow(non_snake_case)]
 #[derive(serde::Deserialize)]
 struct SmsMessage {
     Body: String,
+    From: String,
 }
 
 // Handler for incoming SMS messages
-async fn handle_incoming_sms(Form(SmsMessage { Body }): Form<SmsMessage>) -> impl IntoResponse {
-    // Html(format!(
-    //     r#"
-    //     <?xml version="1.0" encoding="UTF-8"?>
-    //     <Response>
-    //     <Message>Thank you for your submission: {body}</Message>
-    //     </Response>
-    //     "#
-    // ))
-
-    // println!("0:{request:?}");
-    // println!("1:{:?}", request.body());
-    // println!("1:{:?}", body);
-    // println!("2:{:?}", String::from_utf8(body.to_vec()).unwrap());
+async fn handle_incoming_sms(
+    Form(SmsMessage { Body, From }): Form<SmsMessage>,
+) -> impl IntoResponse {
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <Response>
-        <Message>Thank you for your submission: {Body}</Message>
+        <Message>Hello {From}, Thank you for your submission: {Body}</Message>
         </Response>
         "#
     ))
