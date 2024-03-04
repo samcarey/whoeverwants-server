@@ -2,7 +2,7 @@ use anyhow::Result;
 use axum::{
     response::{Html, IntoResponse},
     routing::post,
-    Form, Router,
+    Router,
 };
 use dotenv::dotenv;
 use openapi::apis::{
@@ -53,14 +53,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// Define a struct to deserialize the incoming form data
-#[derive(serde::Deserialize, serde::Serialize)]
-struct SmsMessage {
-    body: String,
-}
-
 // Handler for incoming SMS messages
-async fn handle_incoming_sms(Form(SmsMessage { body }): Form<SmsMessage>) -> impl IntoResponse {
+async fn handle_incoming_sms(body: String) -> impl IntoResponse {
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
