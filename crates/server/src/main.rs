@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     response::{Html, IntoResponse},
     routing::post,
@@ -20,21 +20,6 @@ async fn main() -> Result<()> {
             Some(env::var("TWILIO_API_KEY_SECRET")?),
         )),
         ..Default::default()
-    };
-
-    let message_params = CreateMessageParams {
-        account_sid: env::var("TWILIO_ACCOUNT_SID")?,
-        to: env::var("CLIENT_NUMBER")?,
-        from: Some(env::var("SERVER_NUMBER")?),
-        body: Some("Ahoy again x3, Rustacean! 🦀".into()),
-        ..Default::default()
-    };
-    let message = create_message(&twilio_config, message_params).await;
-    match message {
-        Ok(result) => {
-            println!("Message sent with SID {}", result.sid.unwrap().unwrap())
-        }
-        Err(error) => eprintln!("Error sending message: {}", error),
     };
 
     let app = Router::new().route("/", post(handle_incoming_sms));
@@ -73,4 +58,19 @@ async fn handle_incoming_sms(
         </Response>
         "#
     ))
+}
+
+async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
+    let message_params = CreateMessageParams {
+        account_sid: env::var("TWILIO_ACCOUNT_SID")?,
+        to,
+        from: Some(env::var("SERVER_NUMBER")?),
+        body: Some(message),
+        ..Default::default()
+    };
+    let message = create_message(twilio_config, message_params)
+        .await
+        .context("While sending message")?;
+    println!("Message sent with SID {}", message.sid.unwrap().unwrap());
+    Ok(())
 }
