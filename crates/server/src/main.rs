@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::Request,
+    extract::{RawForm, Request},
     response::{Html, IntoResponse},
     routing::post,
     Router,
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 }
 
 // Handler for incoming SMS messages
-async fn handle_incoming_sms(request: Request) -> impl IntoResponse {
+async fn handle_incoming_sms(RawForm(body): RawForm) -> impl IntoResponse {
     // Html(format!(
     //     r#"
     //     <?xml version="1.0" encoding="UTF-8"?>
@@ -65,7 +65,10 @@ async fn handle_incoming_sms(request: Request) -> impl IntoResponse {
     //     "#
     // ))
 
-    println!("{request:?}");
+    // println!("0:{request:?}");
+    // println!("1:{:?}", request.body());
+    println!("1:{:?}", body);
+    println!("2:{:?}", String::from_utf8(body.to_vec()).unwrap());
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
