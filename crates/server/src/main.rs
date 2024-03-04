@@ -1,9 +1,8 @@
 use anyhow::Result;
 use axum::{
-    extract::{RawForm, Request},
     response::{Html, IntoResponse},
     routing::post,
-    Router,
+    Form, Router,
 };
 use dotenv::dotenv;
 use openapi::apis::{
@@ -54,8 +53,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(non_snake_case)]
+#[derive(serde::Deserialize)]
+struct SmsMessage {
+    Body: String,
+}
+
 // Handler for incoming SMS messages
-async fn handle_incoming_sms(RawForm(body): RawForm) -> impl IntoResponse {
+async fn handle_incoming_sms(Form(SmsMessage { Body }): Form<SmsMessage>) -> impl IntoResponse {
     // Html(format!(
     //     r#"
     //     <?xml version="1.0" encoding="UTF-8"?>
@@ -67,13 +72,13 @@ async fn handle_incoming_sms(RawForm(body): RawForm) -> impl IntoResponse {
 
     // println!("0:{request:?}");
     // println!("1:{:?}", request.body());
-    println!("1:{:?}", body);
-    println!("2:{:?}", String::from_utf8(body.to_vec()).unwrap());
+    // println!("1:{:?}", body);
+    // println!("2:{:?}", String::from_utf8(body.to_vec()).unwrap());
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <Response>
-        <Message>Thank you for your submission: </Message>
+        <Message>Thank you for your submission: {Body}</Message>
         </Response>
         "#
     ))
