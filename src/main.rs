@@ -36,9 +36,10 @@ async fn main() -> Result<()> {
     let app = Router::new().route("/", get(handler).post(handler));
 
     // run it
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:6010")
-        .await
-        .unwrap();
+    let listener =
+        tokio::net::TcpListener::bind(format!("127.0.0.1:{}", env::var("CALLBACK_PORT")?))
+            .await
+            .unwrap();
     println!("listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await.unwrap();
 
