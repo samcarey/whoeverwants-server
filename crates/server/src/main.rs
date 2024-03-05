@@ -66,6 +66,7 @@ async fn handle_incoming_sms(
         From: from,
     }): Form<SmsMessage>,
 ) -> Result<Html<String>, AppError> {
+    println!("Received {body} from {from}");
     let mut words = body.trim().split_ascii_whitespace();
     let command = words.next().map(|word| word.to_lowercase());
     const HELP_HINT: &str = "Reply HELP to show available commands.";
