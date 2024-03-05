@@ -1,10 +1,5 @@
 use anyhow::{Context, Result};
-use axum::{
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
-    routing::post,
-    Extension, Form, Router,
-};
+use axum::{response::Html, routing::post, Extension, Form, Router};
 use dotenv::dotenv;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -61,61 +56,74 @@ struct User {
 // Handler for incoming SMS messages
 async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
-    Form(SmsMessage {
-        Body: body,
-        From: from,
-    }): Form<SmsMessage>,
-) -> Result<Html<String>, AppError> {
-    println!("Received {body} from {from}");
-    let mut words = body.trim().split_ascii_whitespace();
-    let command = words.next().map(|word| word.to_lowercase());
-    const HELP_HINT: &str = "Reply HELP to show available commands.";
-    const MAX_NAME_LEN: usize = 20;
-    let response = if let Some(User { number, name, .. }) =
-        query_as!(User, "select * from users where number = ?", from)
-            .fetch_optional(&pool)
-            .await?
-    {
-        if let Some(command) = command.as_deref() {
-            match command {
-                "stop" => {
-                    query!("delete from users where number = ?", number)
-                        .execute(&pool)
-                        .await?;
-                    format!("You've been unsubscribed. Goodbye!")
-                }
-                command => {
-                    format!(
-                        "Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}"
-                    )
-                }
-            }
-        } else {
-            HELP_HINT.to_string()
-        }
-    } else {
-        match (command.as_deref(), words.next()) {
-            (Some("start"), Some(name)) if name.len() <= MAX_NAME_LEN => {
-                query!("insert into users (number, name) values (?, ?)", from, name)
-                    .execute(&pool)
-                    .await?;
-                format!("Thank you for participating, {name}!. {HELP_HINT}")
-            }
-            _ => {
-                format!(
-                    "Welcome to Sam Carey's experimental social server. To participate, reply 'START <name>', where <name> is your preferred name (max {MAX_NAME_LEN} characters)."
-                )
-            }
+    Form(message): Form<SmsMessage>,
+) -> Html<String> {
+    let response = match process(message, &pool).await {
+        Ok(response) => response,
+        Err(error) => {
+            println!("Error: {error}");
+            "Internal Server Error!".to_string()
         }
     };
-    Ok(Html(format!(
+    Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
         <Response>
         <Message>{response}</Message>
         </Response>
         "#
-    )))
+    ))
+}
+
+async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
+    let SmsMessage {
+        Body: body,
+        From: from,
+    } = message;
+    println!("Received {body} from {from}");
+    const HELP_HINT: &str = "Reply HELP to show available commands.";
+    const MAX_NAME_LEN: usize = 20;
+    let mut words = body.trim().split_ascii_whitespace();
+    let command = words.next().map(|word| word.to_lowercase());
+    Ok(
+        if let Some(User { number, name, .. }) =
+            query_as!(User, "select * from users where number = ?", from)
+                .fetch_optional(pool)
+                .await?
+        {
+            if let Some(command) = command.as_deref() {
+                match command {
+                    "stop" => {
+                        query!("delete from users where number = ?", number)
+                            .execute(pool)
+                            .await?;
+                        format!("You've been unsubscribed. Goodbye!")
+                    }
+                    command => {
+                        format!(
+                        "Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}"
+                    )
+                    }
+                }
+            } else {
+                HELP_HINT.to_string()
+            }
+        } else {
+            match (command.as_deref(), words.next()) {
+                (Some("start"), Some(name)) if name.len() <= MAX_NAME_LEN => {
+                    query!("insert into users (number, name) values (?, ?)", from, name)
+                        .execute(pool)
+                        .await?;
+                    format!("Thank you for participating, {name}!. {HELP_HINT}")
+                }
+                _ => {
+                    format!(
+                    "Welcome to Sam Carey's experimental social server. To participate, reply 'START <name>', where <name> is your preferred name (max {MAX_NAME_LEN} characters)."
+                )
+                }
+            }
+        },
+    )
 }
 
 async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
@@ -133,27 +141,27 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
     Ok(())
 }
 
-// Make our own error that wraps `anyhow::Error`.
-struct AppError(anyhow::Error);
+// // Make our own error that wraps `anyhow::Error`.
+// struct AppError(anyhow::Error);
 
-// Tell axum how to convert `AppError` into a response.
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", self.0),
-        )
-            .into_response()
-    }
-}
+// // Tell axum how to convert `AppError` into a response.
+// impl IntoResponse for AppError {
+//     fn into_response(self) -> Response {
+//         (
+//             StatusCode::INTERNAL_SERVER_ERROR,
+//             format!("Something went wrong: {}", self.0),
+//         )
+//             .into_response()
+//     }
+// }
 
-// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
-// `Result<_, AppError>`. That way you don't need to do that manually.
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
-}
+// // This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// // `Result<_, AppError>`. That way you don't need to do that manually.
+// impl<E> From<E> for AppError
+// where
+//     E: Into<anyhow::Error>,
+// {
+//     fn from(err: E) -> Self {
+//         Self(err.into())
+//     }
+// }
