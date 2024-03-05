@@ -16,9 +16,6 @@ use std::env;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv()?;
-    let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
-    sqlx::query!("").fetch_one(&pool).await?;
-
     let twilio_config = Configuration {
         basic_auth: Some((
             env::var("TWILIO_API_KEY_SID")?,
@@ -26,6 +23,14 @@ async fn main() -> Result<()> {
         )),
         ..Default::default()
     };
+    send(
+        &twilio_config,
+        env::var("CLIENT_NUMBER")?,
+        "Server is starting up".to_string(),
+    )
+    .await?;
+    let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    sqlx::query!("").fetch_one(&pool).await?;
 
     let app = Router::new()
         .route("/", post(handle_incoming_sms))
