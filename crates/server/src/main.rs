@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
-use axum::{response::Html, routing::post, Extension, Form, Router};
+use axum::{
+    response::{Html, IntoResponse},
+    routing::post,
+    Extension, Form, Router,
+};
 use dotenv::dotenv;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -57,7 +61,7 @@ struct User {
 async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
     Form(message): Form<SmsMessage>,
-) -> Html<String> {
+) -> impl IntoResponse {
     let response = match process(message, &pool).await {
         Ok(response) => response,
         Err(error) => {
