@@ -30,22 +30,17 @@ async fn main() -> Result<()> {
     )
     .await?;
     let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
-    sqlx::query!("").fetch_one(&pool).await?;
-
     let app = Router::new()
         .route("/", post(handle_incoming_sms))
         .layer(Extension(pool));
-
-    // run it
     let listener = tokio::net::TcpListener::bind(format!(
         "{}:{}",
         env::var("CALLBACK_IP")?,
         env::var("CALLBACK_PORT")?
     ))
-    .await
-    .unwrap();
+    .await?;
     println!("listening on {}", listener.local_addr()?);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
 
     Ok(())
 }
