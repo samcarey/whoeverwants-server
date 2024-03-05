@@ -65,6 +65,7 @@ async fn handle_incoming_sms(
             "Internal Server Error!".to_string()
         }
     };
+    println!("Sending response: {response}");
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
