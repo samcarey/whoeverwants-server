@@ -85,7 +85,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         Body: body,
         From: from,
     } = message;
-    println!("Received {body} from {from}");
+    println!("Received from {from}: {body}");
     const HELP_HINT: &str = "Reply HELP to show available commands.";
     const MAX_NAME_LEN: usize = 20;
     let mut words = body.trim().split_ascii_whitespace();
@@ -123,7 +123,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                 }
                 _ => {
                     format!(
-                    "Welcome to Sam Carey's experimental social server. To participate, reply 'START <name>', where <name> is your preferred name (max {MAX_NAME_LEN} characters)."
+                    "Welcome to Sam Carey's experimental social server. To participate, reply 'START NAME', where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
                 )
                 }
             }
