@@ -12,3 +12,4 @@ openapi = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
+sqlx = { version = "=0.7.3", features = ["sqlite", "runtime-tokio"] }
