@@ -167,7 +167,8 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         } else {
             match command {
                 Some(Ok(Command::name)) => {
-                    if let Some(name) = words.next() {
+                    let name = words.collect::<Vec<_>>().join(" ");
+                    if !name.is_empty() {
                         if name.len() <= MAX_NAME_LEN {
                             query!("insert into users (number, name) values (?, ?)", from, name)
                                 .execute(pool)
