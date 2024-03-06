@@ -28,9 +28,9 @@ impl Display for Command {
 impl Command {
     pub fn help(&self) -> String {
         match self {
-            Self::h => "Show list of available commands",
-            Self::name => "Set preferred name, e.g. 'name NAME'",
-            Self::stop => "Stop receiving messages",
+            Self::h => "Show a list of available commands",
+            Self::name => "Set your preferred name: 'name NAME'",
+            Self::stop => "Stop receiving messages and remove yourself from the database",
         }
         .to_string()
     }
