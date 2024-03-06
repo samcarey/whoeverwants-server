@@ -5,13 +5,15 @@ use axum::{
     Extension, Form, Router,
 };
 use dotenv::dotenv;
+use enum_iterator::{all, Sequence};
 use log::*;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as, Pool, Sqlite};
-use std::env;
+use std::{env, fmt::Display};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -83,6 +85,38 @@ async fn handle_incoming_sms(
     ))
 }
 
+#[allow(non_camel_case_types)]
+#[derive(Deserialize, Serialize, Sequence, Debug)]
+enum Command {
+    h,
+    name,
+    stop,
+}
+
+impl TryFrom<&str> for Command {
+    type Error = serde_json::Error;
+    fn try_from(value: &str) -> std::prelude::v1::Result<Self, Self::Error> {
+        serde_json::from_str(&value.to_lowercase())
+    }
+}
+
+impl Display for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", format!("{:?}", self).split("::").last().unwrap())
+    }
+}
+
+impl Command {
+    fn help(&self) -> String {
+        match self {
+            Self::h => "Show list of available commands",
+            Self::name => "Set preferred name: name NAME",
+            Self::stop => "Stop receiving messages",
+        }
+        .to_string()
+    }
+}
+
 async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
     let SmsMessage {
         Body: body,
@@ -92,48 +126,76 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
     const HELP_HINT: &str = "Reply H to show available commands.";
     const MAX_NAME_LEN: usize = 20;
     let mut words = body.trim().split_ascii_whitespace();
-    let command = words.next().map(|word| word.to_lowercase());
+    let command_word = words.next();
+    let command = command_word.map(|word| Command::try_from(word));
     Ok(
         if let Some(User { number, name, .. }) =
             query_as!(User, "select * from users where number = ?", from)
                 .fetch_optional(pool)
                 .await?
         {
-            if let Some(command) = command.as_deref() {
-                match command {
-                    "name" => {
-                        if let Some(name) = words.next() {
-                            if name.len() <= MAX_NAME_LEN {
-                                query!("update users set name = ? where number = ?", name, from)
+            if let Some(command) = command {
+                if let Ok(command) = command {
+                    match command {
+                        Command::name => {
+                            let name = words.collect::<Vec<_>>().join(" ");
+                            if !name.is_empty() {
+                                if name.len() <= MAX_NAME_LEN {
+                                    query!(
+                                        "update users set name = ? where number = ?",
+                                        name,
+                                        from
+                                    )
                                     .execute(pool)
                                     .await?;
-                                format!("Your name has been updated to {name}")
+                                    format!("Your name has been updated to {name}")
+                                } else {
+                                    format!("That name is '{}' characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                                }
                             } else {
-                                format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                                "Make sure you follow the name command with a space and then your name: 'name NAME'".to_string()
                             }
-                        } else {
-                            "Make sure you follow the name command with a space and then your name: 'name NAME'".to_string()
+                        }
+                        Command::stop => {
+                            query!("delete from users where number = ?", number)
+                                .execute(pool)
+                                .await?;
+                            // They won't actually see this when using Twilio
+                            "You've been unsubscribed. Goodbye!".to_string()
+                        }
+                        // I would use HELP for the help command, but Twilio intercepts and does not relay that
+                        Command::h => {
+                            let command_text = words.next();
+                            if let Some(command) = command_text.map(|word| Command::try_from(word))
+                            {
+                                if let Ok(command) = command {
+                                    format!("{command}: {}", command.help())
+                                } else {
+                                    format!("Command '{}' not recognized", command_text.unwrap())
+                                }
+                            } else {
+                                format!(
+                                    "Available commands: {}. Reply 'H COMMAND' to see help for COMMAND",
+                                    all::<Command>()
+                                        .map(|c| c.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                )
+                            }
                         }
                     }
-                    "stop" => {
-                        query!("delete from users where number = ?", number)
-                            .execute(pool)
-                            .await?;
-                        // They won't actually see this when using Twilio
-                        "You've been unsubscribed. Goodbye!".to_string()
-                    }
-                    // I would use HELP for the help command, but Twilio intercepts and does not relay that
-                    "h" => "To be implemented...".to_string(),
-                    command => {
-                        format!("Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}")
-                    }
+                } else {
+                    format!(
+                        "Hey {name}! We didn't recognize that command word: '{}'. {HELP_HINT}",
+                        command_word.unwrap()
+                    )
                 }
             } else {
                 HELP_HINT.to_string()
             }
         } else {
-            match command.as_deref() {
-                Some("name") => {
+            match command {
+                Some(Ok(Command::name)) => {
                     if let Some(name) = words.next() {
                         if name.len() <= MAX_NAME_LEN {
                             query!("insert into users (number, name) values (?, ?)", from, name)
