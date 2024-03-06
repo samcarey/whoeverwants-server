@@ -86,7 +86,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         From: from,
     } = message;
     println!("Received from {from}: {body}");
-    const HELP_HINT: &str = "Reply HELP to show available commands.";
+    const HELP_HINT: &str = "Reply H to show available commands.";
     const MAX_NAME_LEN: usize = 20;
     let mut words = body.trim().split_ascii_whitespace();
     let command = words.next().map(|word| word.to_lowercase());
@@ -113,14 +113,14 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                         }
                     }
                     "stop" => {
-                        println!("Stop received");
                         query!("delete from users where number = ?", number)
                             .execute(pool)
                             .await?;
                         // They won't actually see this when using Twilio
                         "You've been unsubscribed. Goodbye!".to_string()
                     }
-                    "help" => "To be implemented...".to_string(),
+                    // I would use HELP for the help command, but Twilio intercepts and does not relay that
+                    "h" => "To be implemented...".to_string(),
                     command => {
                         format!("Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}")
                     }
