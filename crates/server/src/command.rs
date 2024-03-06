@@ -29,7 +29,7 @@ impl Command {
     pub fn help(&self) -> String {
         match self {
             Self::h => "Show list of available commands",
-            Self::name => "Set preferred name: name NAME",
+            Self::name => "Set preferred name, e.g. 'name NAME'",
             Self::stop => "Stop receiving messages",
         }
         .to_string()
