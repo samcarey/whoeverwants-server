@@ -5,6 +5,7 @@ use axum::{
     Extension, Form, Router,
 };
 use dotenv::dotenv;
+use log::*;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
@@ -15,6 +16,8 @@ use std::env;
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv()?;
+    env_logger::init();
+    info!("Starting up");
     let twilio_config = Configuration {
         basic_auth: Some((
             env::var("TWILIO_API_KEY_SID")?,
@@ -38,7 +41,7 @@ async fn main() -> Result<()> {
         env::var("CALLBACK_PORT")?
     ))
     .await?;
-    println!("listening on {}", listener.local_addr()?);
+    info!("Listening on {}", listener.local_addr()?);
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -65,11 +68,11 @@ async fn handle_incoming_sms(
     let response = match process(message, &pool).await {
         Ok(response) => response,
         Err(error) => {
-            println!("Error: {error}");
+            error!("Error: {error:?}");
             "Internal Server Error!".to_string()
         }
     };
-    println!("Sending response: {response}");
+    debug!("Sending response: {response}");
     Html(format!(
         r#"
         <?xml version="1.0" encoding="UTF-8"?>
@@ -85,7 +88,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         Body: body,
         From: from,
     } = message;
-    println!("Received from {from}: {body}");
+    debug!("Received from {from}: {body}");
     const HELP_HINT: &str = "Reply H to show available commands.";
     const MAX_NAME_LEN: usize = 20;
     let mut words = body.trim().split_ascii_whitespace();
@@ -167,7 +170,7 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
     let message = create_message(twilio_config, message_params)
         .await
         .context("While sending message")?;
-    println!("Message sent with SID {}", message.sid.unwrap().unwrap());
+    trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
     Ok(())
 }
 
