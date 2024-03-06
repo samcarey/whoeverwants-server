@@ -5,15 +5,18 @@ use axum::{
     Extension, Form, Router,
 };
 use dotenv::dotenv;
-use enum_iterator::{all, Sequence};
+use enum_iterator::all;
 use log::*;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
 };
-use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as, Pool, Sqlite};
-use std::{env, fmt::Display};
+use std::env;
+
+use crate::command::Command;
+
+mod command;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -83,38 +86,6 @@ async fn handle_incoming_sms(
         </Response>
         "#
     ))
-}
-
-#[allow(non_camel_case_types)]
-#[derive(Deserialize, Serialize, Sequence, Debug)]
-enum Command {
-    h,
-    name,
-    stop,
-}
-
-impl TryFrom<&str> for Command {
-    type Error = serde_json::Error;
-    fn try_from(value: &str) -> std::prelude::v1::Result<Self, Self::Error> {
-        serde_json::from_str(&value.to_lowercase())
-    }
-}
-
-impl Display for Command {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", format!("{:?}", self).split("::").last().unwrap())
-    }
-}
-
-impl Command {
-    fn help(&self) -> String {
-        match self {
-            Self::h => "Show list of available commands",
-            Self::name => "Set preferred name: name NAME",
-            Self::stop => "Stop receiving messages",
-        }
-        .to_string()
-    }
 }
 
 async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
