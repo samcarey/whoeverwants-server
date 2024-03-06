@@ -98,33 +98,58 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         {
             if let Some(command) = command.as_deref() {
                 match command {
+                    "name" => {
+                        if let Some(name) = words.next() {
+                            if name.len() <= MAX_NAME_LEN {
+                                query!("update users set name = ? where number = ?", name, from)
+                                    .execute(pool)
+                                    .await?;
+                                format!("Your name has been updated to {name}")
+                            } else {
+                                format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                            }
+                        } else {
+                            "Make sure you follow the name command with a space and then your name: 'name NAME'".to_string()
+                        }
+                    }
                     "stop" => {
+                        println!("Stop received");
                         query!("delete from users where number = ?", number)
                             .execute(pool)
                             .await?;
-                        format!("You've been unsubscribed. Goodbye!")
+                        // They won't actually see this when using Twilio
+                        "You've been unsubscribed. Goodbye!".to_string()
                     }
+                    "help" => "To be implemented...".to_string(),
                     command => {
-                        format!(
-                        "Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}"
-                    )
+                        format!("Hey {name}! We didn't recognize that command word: '{command}'. {HELP_HINT}")
                     }
                 }
             } else {
                 HELP_HINT.to_string()
             }
         } else {
-            match (command.as_deref(), words.next()) {
-                (Some("start"), Some(name)) if name.len() <= MAX_NAME_LEN => {
-                    query!("insert into users (number, name) values (?, ?)", from, name)
-                        .execute(pool)
-                        .await?;
-                    format!("Thank you for participating, {name}!. {HELP_HINT}")
+            match command.as_deref() {
+                Some("name") => {
+                    if let Some(name) = words.next() {
+                        if name.len() <= MAX_NAME_LEN {
+                            query!("insert into users (number, name) values (?, ?)", from, name)
+                                .execute(pool)
+                                .await?;
+                            format!("Hi, {name}! {HELP_HINT}")
+                        } else {
+                            format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                        }
+                    } else {
+                        "Make sure you follow the 'name' command with a space and then your name: 'name NAME'".to_string()
+                    }
                 }
                 _ => {
                     format!(
-                    "Welcome to Sam Carey's experimental social server. To participate, reply 'START NAME', where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
-                )
+                        "Welcome to Sam Carey's experimental social server! \
+                        To participate, reply 'name NAME', \
+                        where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
+                    )
                 }
             }
         },
