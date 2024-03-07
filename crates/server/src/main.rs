@@ -62,6 +62,7 @@ struct SmsMessage {
 
 struct User {
     number: String,
+    #[allow(dead_code)]
     name: String,
 }
 
@@ -102,10 +103,11 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
     let command_word = words.next();
     let command = command_word.map(|word| Command::try_from(word));
 
-    let Some(User { number, name, .. }) =
-        query_as!(User, "select * from users where number = ?", from)
-            .fetch_optional(pool)
-            .await?
+    let Some(User {
+        number, name: _, ..
+    }) = query_as!(User, "select * from users where number = ?", from)
+        .fetch_optional(pool)
+        .await?
     else {
         return handle_new_user(command, words, &from, pool).await;
     };
@@ -116,7 +118,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
 
     let Ok(command) = command else {
         return Ok(format!(
-            "Hey {name}! We didn't recognize that command word: '{}'. {HELP_HINT}",
+            "We didn't recognize that command word: '{}'. {HELP_HINT}",
             command_word.unwrap()
         ));
     };
@@ -129,13 +131,19 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                     query!("update users set name = ? where number = ?", name, from)
                         .execute(pool)
                         .await?;
-                    format!("Your name has been updated to {name}")
+                    format!("Your name has been updated to '{name}'")
                 } else {
-                    format!("That name is '{}' characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                    format!(
+                        "That name is {} characters long.\n\
+                        Please shorten it to {MAX_NAME_LEN} characters or less",
+                        name.len()
+                    )
                 }
             } else {
-                "Make sure you follow the name command with a space and then your name: 'name NAME'"
-                    .to_string()
+                format!(
+                    "Make sure you follow the 'name' command with a space and then your name.{}",
+                    Command::name.example()
+                )
             }
         }
         Command::stop => {
@@ -163,10 +171,9 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                         .join("\n")
                 );
                 let command_help_hint = format!(
-                    "Reply '{} &lt;command&gt;' to see help for a command.\nExample: '{} {}'",
-                    Command::h,
-                    Command::h,
-                    Command::name
+                    "Reply '{}' to see help for a command.{}",
+                    Command::h.usage(),
+                    Command::h.example()
                 );
                 format!("{available_commands}{command_help_hint}")
             }
@@ -191,7 +198,11 @@ async fn handle_new_user(
                         .await?;
                     format!("Hi, {name}! {HELP_HINT}")
                 } else {
-                    format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                    format!(
+                        "That name is {} characters long.\n\
+                        Please shorten it to {MAX_NAME_LEN} characters or less",
+                        name.len()
+                    )
                 }
             } else {
                 "Make sure you follow the 'name' command with a space and then your name: 'name NAME'".to_string()
@@ -199,9 +210,8 @@ async fn handle_new_user(
         }
         _ => {
             format!(
-                "Welcome to Sam Carey's experimental social server!\n
-                To participate, reply 'name NAME', 
-                where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
+                "Welcome to Sam Carey's experimental social server!\n\
+                To participate, reply 'name NAME', where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
             )
         }
     })

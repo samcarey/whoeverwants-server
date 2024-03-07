@@ -27,12 +27,34 @@ impl Display for Command {
 
 impl Command {
     pub fn help(&self) -> String {
+        format!(
+            "{}.{}",
+            match self {
+                Self::h => "Show a list of available commands",
+                Self::name => "Set your preferred name",
+                Self::stop => "Stop receiving messages and remove yourself from the database",
+            },
+            self.example()
+        )
+    }
+    pub fn example(&self) -> String {
+        format!(
+            "\nExample: '{}'",
+            match self {
+                Self::h => format!("h {}", Self::name),
+                Self::name => "name John S.".to_string(),
+                Self::stop => "stop".to_string(),
+            }
+        )
+    }
+    pub fn usage(&self) -> String {
+        let mut args = vec![self.to_string()];
         match self {
-            Self::h => "Show a list of available commands",
-            Self::name => "Set your preferred name: 'name NAME'",
-            Self::stop => "Stop receiving messages and remove yourself from the database",
+            Self::h => args.push("<command>".to_string()),
+            Self::name => args.push("<name>".to_string()),
+            Self::stop => {}
         }
-        .to_string()
+        args.join(" ").replace("<", "&lt").replace(">", "&gt")
     }
 }
 
