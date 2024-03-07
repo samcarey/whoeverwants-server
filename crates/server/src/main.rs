@@ -163,7 +163,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                         .join("\n")
                 );
                 let command_help_hint = format!(
-                    "Reply '{} &lt;command&gt;' to see help for that command.\nExample: '{} {}'",
+                    "Reply '{} &lt;command&gt;' to see help for a command.\nExample: '{} {}'",
                     Command::h,
                     Command::h,
                     Command::name
@@ -199,8 +199,8 @@ async fn handle_new_user(
         }
         _ => {
             format!(
-                "Welcome to Sam Carey's experimental social server! \
-                To participate, reply 'name NAME', \
+                "Welcome to Sam Carey's experimental social server!\n
+                To participate, reply 'name NAME', 
                 where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
             )
         }
