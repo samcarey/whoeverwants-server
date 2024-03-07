@@ -88,112 +88,123 @@ async fn handle_incoming_sms(
     ))
 }
 
+const HELP_HINT: &str = "Reply H to show available commands.";
+const MAX_NAME_LEN: usize = 20;
+
 async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
     let SmsMessage {
         Body: body,
         From: from,
     } = message;
     debug!("Received from {from}: {body}");
-    const HELP_HINT: &str = "Reply H to show available commands.";
-    const MAX_NAME_LEN: usize = 20;
+
     let mut words = body.trim().split_ascii_whitespace();
     let command_word = words.next();
     let command = command_word.map(|word| Command::try_from(word));
-    Ok(
-        if let Some(User { number, name, .. }) =
-            query_as!(User, "select * from users where number = ?", from)
-                .fetch_optional(pool)
-                .await?
-        {
-            if let Some(command) = command {
-                if let Ok(command) = command {
-                    match command {
-                        Command::name => {
-                            let name = words.collect::<Vec<_>>().join(" ");
-                            if !name.is_empty() {
-                                if name.len() <= MAX_NAME_LEN {
-                                    query!(
-                                        "update users set name = ? where number = ?",
-                                        name,
-                                        from
-                                    )
-                                    .execute(pool)
-                                    .await?;
-                                    format!("Your name has been updated to {name}")
-                                } else {
-                                    format!("That name is '{}' characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
-                                }
-                            } else {
-                                "Make sure you follow the name command with a space and then your name: 'name NAME'".to_string()
-                            }
-                        }
-                        Command::stop => {
-                            query!("delete from users where number = ?", number)
-                                .execute(pool)
-                                .await?;
-                            // They won't actually see this when using Twilio
-                            "You've been unsubscribed. Goodbye!".to_string()
-                        }
-                        // I would use HELP for the help command, but Twilio intercepts and does not relay that
-                        Command::h => {
-                            let command_text = words.next();
-                            if let Some(command) = command_text.map(|word| Command::try_from(word))
-                            {
-                                if let Ok(command) = command {
-                                    format!("{command}: {}", command.help())
-                                } else {
-                                    format!("Command '{}' not recognized", command_text.unwrap())
-                                }
-                            } else {
-                                format!(
-                                    r#"Available commands:\n{}\nReply '{}' and then a space and a command above to see help for that command. Example: '{} {}'"#,
-                                    all::<Command>()
-                                        .map(|c| format!("- {c}"))
-                                        .collect::<Vec<_>>()
-                                        .join("\n"),
-                                    Command::h,
-                                    Command::h,
-                                    Command::name,
-                                )
-                            }
-                        }
-                    }
+
+    let Some(User { number, name, .. }) =
+        query_as!(User, "select * from users where number = ?", from)
+            .fetch_optional(pool)
+            .await?
+    else {
+        return handle_new_user(command, words, &from, pool).await;
+    };
+
+    let Some(command) = command else {
+        return Ok(HELP_HINT.to_string());
+    };
+
+    let Ok(command) = command else {
+        return Ok(format!(
+            "Hey {name}! We didn't recognize that command word: '{}'. {HELP_HINT}",
+            command_word.unwrap()
+        ));
+    };
+
+    let response = match command {
+        Command::name => {
+            let name = words.collect::<Vec<_>>().join(" ");
+            if !name.is_empty() {
+                if name.len() <= MAX_NAME_LEN {
+                    query!("update users set name = ? where number = ?", name, from)
+                        .execute(pool)
+                        .await?;
+                    format!("Your name has been updated to {name}")
                 } else {
-                    format!(
-                        "Hey {name}! We didn't recognize that command word: '{}'. {HELP_HINT}",
-                        command_word.unwrap()
-                    )
+                    format!("That name is '{}' characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
                 }
             } else {
-                HELP_HINT.to_string()
+                "Make sure you follow the name command with a space and then your name: 'name NAME'"
+                    .to_string()
             }
-        } else {
-            match command {
-                Some(Ok(Command::name)) => {
-                    let name = words.collect::<Vec<_>>().join(" ");
-                    if !name.is_empty() {
-                        if name.len() <= MAX_NAME_LEN {
-                            query!("insert into users (number, name) values (?, ?)", from, name)
-                                .execute(pool)
-                                .await?;
-                            format!("Hi, {name}! {HELP_HINT}")
-                        } else {
-                            format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
-                        }
-                    } else {
-                        "Make sure you follow the 'name' command with a space and then your name: 'name NAME'".to_string()
-                    }
+        }
+        Command::stop => {
+            query!("delete from users where number = ?", number)
+                .execute(pool)
+                .await?;
+            // They won't actually see this when using Twilio
+            "You've been unsubscribed. Goodbye!".to_string()
+        }
+        // I would use HELP for the help command, but Twilio intercepts and does not relay that
+        Command::h => {
+            let command_text = words.next();
+            if let Some(command) = command_text.map(|word| Command::try_from(word)) {
+                if let Ok(command) = command {
+                    format!("{command}: {}", command.help())
+                } else {
+                    format!("Command '{}' not recognized", command_text.unwrap())
                 }
-                _ => {
-                    format!(
-                        "Welcome to Sam Carey's experimental social server! \
-                        To participate, reply 'name NAME', \
-                        where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
-                    )
-                }
+            } else {
+                let available_commands = format!(
+                    "Available commands:\n{}\n",
+                    all::<Command>()
+                        .map(|c| format!("- {c}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                let command_help_hint = format!(
+                    "Reply '{} &lt;command&gt;' to see help for that command.\nExample: '{} {}'",
+                    Command::h,
+                    Command::h,
+                    Command::name
+                );
+                format!("{available_commands}{command_help_hint}")
             }
-        },
-    )
+        }
+    };
+    Ok(response)
+}
+
+async fn handle_new_user(
+    command: Option<Result<Command, serde_json::Error>>,
+    words: impl Iterator<Item = &str>,
+    from: &str,
+    pool: &Pool<Sqlite>,
+) -> anyhow::Result<String> {
+    Ok(match command {
+        Some(Ok(Command::name)) => {
+            let name = words.collect::<Vec<_>>().join(" ");
+            if !name.is_empty() {
+                if name.len() <= MAX_NAME_LEN {
+                    query!("insert into users (number, name) values (?, ?)", from, name)
+                        .execute(pool)
+                        .await?;
+                    format!("Hi, {name}! {HELP_HINT}")
+                } else {
+                    format!("That name is {} characters long. Please shorten it to {MAX_NAME_LEN} characters or less", name.len())
+                }
+            } else {
+                "Make sure you follow the 'name' command with a space and then your name: 'name NAME'".to_string()
+            }
+        }
+        _ => {
+            format!(
+                "Welcome to Sam Carey's experimental social server! \
+                To participate, reply 'name NAME', \
+                where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
+            )
+        }
+    })
 }
 
 async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
