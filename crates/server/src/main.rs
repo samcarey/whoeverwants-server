@@ -71,7 +71,7 @@ async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
     Form(message): Form<SmsMessage>,
 ) -> impl IntoResponse {
-    let response = match process(message, &pool).await {
+    let response = match process_message(message, &pool).await {
         Ok(response) => response,
         Err(error) => {
             error!("Error: {error:?}");
@@ -92,7 +92,7 @@ async fn handle_incoming_sms(
 const HELP_HINT: &str = "Reply H to show available commands.";
 const MAX_NAME_LEN: usize = 20;
 
-async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
+async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
     let SmsMessage {
         Body: body,
         From: from,
@@ -109,7 +109,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
         .fetch_optional(pool)
         .await?
     else {
-        return handle_new_user(command, words, &from, pool).await;
+        return onboard_new_user(command, words, &from, pool).await;
     };
 
     let Some(command) = command else {
@@ -182,7 +182,7 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
     Ok(response)
 }
 
-async fn handle_new_user(
+async fn onboard_new_user(
     command: Option<Result<Command, serde_json::Error>>,
     words: impl Iterator<Item = &str>,
     from: &str,
