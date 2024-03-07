@@ -188,32 +188,33 @@ async fn handle_new_user(
     from: &str,
     pool: &Pool<Sqlite>,
 ) -> anyhow::Result<String> {
-    Ok(match command {
-        Some(Ok(Command::name)) => {
-            let name = words.collect::<Vec<_>>().join(" ");
-            if !name.is_empty() {
-                if name.len() <= MAX_NAME_LEN {
-                    query!("insert into users (number, name) values (?, ?)", from, name)
-                        .execute(pool)
-                        .await?;
-                    format!("Hi, {name}! {HELP_HINT}")
-                } else {
-                    format!(
-                        "That name is {} characters long.\n\
-                        Please shorten it to {MAX_NAME_LEN} characters or less",
-                        name.len()
-                    )
-                }
-            } else {
-                "Make sure you follow the 'name' command with a space and then your name: 'name NAME'".to_string()
-            }
-        }
-        _ => {
+    let Some(Ok(Command::name)) = command else {
+        return Ok(format!(
+            "Welcome to Sam Carey's experimental social server!\n\
+            To participate, reply '{}' to set your name (max {MAX_NAME_LEN} characters).{}",
+            Command::name.usage(),
+            Command::name.example()
+        ));
+    };
+    let name = words.collect::<Vec<_>>().join(" ");
+    Ok(if !name.is_empty() {
+        if name.len() <= MAX_NAME_LEN {
+            query!("insert into users (number, name) values (?, ?)", from, name)
+                .execute(pool)
+                .await?;
+            format!("Hello, {name}! {HELP_HINT}")
+        } else {
             format!(
-                "Welcome to Sam Carey's experimental social server!\n\
-                To participate, reply 'name NAME', where NAME is your preferred name (max {MAX_NAME_LEN} characters)."
+                "That name is {} characters long.\n\
+                Please shorten it to {MAX_NAME_LEN} characters or less",
+                name.len()
             )
         }
+    } else {
+        format!(
+            "Make sure you follow the 'name' command with a space and then your name.{}",
+            Command::name.example()
+        )
     })
 }
 
