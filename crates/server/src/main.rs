@@ -146,11 +146,14 @@ async fn process(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<Str
                                 }
                             } else {
                                 format!(
-                                    "Available commands: {}. Reply 'H COMMAND' to see help for COMMAND.",
+                                    r#"Available commands:\n{}\nReply '{}' and then a space and a command above to see help for that command. Example: '{} {}'"#,
                                     all::<Command>()
-                                        .map(|c| c.to_string())
+                                        .map(|c| format!("- {c}"))
                                         .collect::<Vec<_>>()
-                                        .join(", ")
+                                        .join("\n"),
+                                    Command::h,
+                                    Command::h,
+                                    Command::name,
                                 )
                             }
                         }
