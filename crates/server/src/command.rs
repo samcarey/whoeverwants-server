@@ -58,9 +58,9 @@ impl Command {
             description,
         }) = self.parameter_doc()
         {
-            format!("Reply '{self} X',\nwhere X is {description}.\nExample: {self} {example}")
+            format!("Reply \"{self} X\", where X is {description}.\nExample: \"{self} {example}\".")
         } else {
-            format!("Reply '{self}'")
+            format!("Reply \"{self}\"")
         }
     }
 }

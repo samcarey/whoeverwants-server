@@ -89,7 +89,7 @@ async fn handle_incoming_sms(
     ))
 }
 
-const HELP_HINT: &str = "Reply 'H' to show available commands.";
+const HELP_HINT: &str = "Reply \"H\" to show available commands.";
 const MAX_NAME_LEN: usize = 20;
 
 async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
@@ -118,7 +118,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
 
     let Ok(command) = command else {
         return Ok(format!(
-            "We didn't recognize that command word: '{}'. {HELP_HINT}",
+            "We didn't recognize that command word: \"{}\". {HELP_HINT}",
             command_word.unwrap()
         ));
     };
@@ -129,7 +129,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
                 query!("update users set name = ? where number = ?", name, from)
                     .execute(pool)
                     .await?;
-                format!("Your name has been updated to '{name}'")
+                format!("Your name has been updated to \"{name}\"")
             }
             Err(hint) => hint.to_string(),
         },
@@ -145,9 +145,9 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
             let command_text = words.next();
             if let Some(command) = command_text.map(|word| Command::try_from(word)) {
                 if let Ok(command) = command {
-                    format!("{command}: {}", command.description())
+                    format!("{command}: {}.\n{}", command.description(), command.usage())
                 } else {
-                    format!("Command '{}' not recognized", command_text.unwrap())
+                    format!("Command \"{}\" not recognized", command_text.unwrap())
                 }
             } else {
                 let available_commands = format!(
@@ -158,7 +158,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
                         .join("\n")
                 );
                 let help_usage = Command::h.usage();
-                format!("{available_commands}{help_usage}")
+                format!("{available_commands}\n{help_usage}")
             }
         }
     };
