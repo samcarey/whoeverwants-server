@@ -190,11 +190,16 @@ async fn onboard_new_user(
 ) -> anyhow::Result<String> {
     let Some(Ok(Command::name)) = command else {
         return Ok(format!(
-            "Welcome to Sam Carey's experimental social server!\n\
-            To participate, reply '{}' to set your name (max {MAX_NAME_LEN} characters).{}",
-            Command::name.usage(),
+            "Welcome to Sam Carey's experimental social server!\nTo participate, reply '' to set your name (max {MAX_NAME_LEN} characters).{}",
+            // Command::name.usage(),
             Command::name.example()
         ));
+        // return Ok(format!(
+        //     "Welcome to Sam Carey's experimental social server!\n\
+        //     To participate, reply '{}' to set your name (max {MAX_NAME_LEN} characters).{}",
+        //     Command::name.usage(),
+        //     Command::name.example()
+        // ));
     };
     let name = words.collect::<Vec<_>>().join(" ");
     Ok(if !name.is_empty() {
