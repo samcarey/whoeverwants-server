@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::{
     response::{Html, IntoResponse},
     routing::post,
@@ -89,7 +89,7 @@ async fn handle_incoming_sms(
     ))
 }
 
-const HELP_HINT: &str = "Reply H to show available commands.";
+const HELP_HINT: &str = "Reply 'H' to show available commands.";
 const MAX_NAME_LEN: usize = 20;
 
 async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
@@ -124,28 +124,15 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
     };
 
     let response = match command {
-        Command::name => {
-            let name = words.collect::<Vec<_>>().join(" ");
-            if !name.is_empty() {
-                if name.len() <= MAX_NAME_LEN {
-                    query!("update users set name = ? where number = ?", name, from)
-                        .execute(pool)
-                        .await?;
-                    format!("Your name has been updated to '{name}'")
-                } else {
-                    format!(
-                        "That name is {} characters long.\n\
-                        Please shorten it to {MAX_NAME_LEN} characters or less",
-                        name.len()
-                    )
-                }
-            } else {
-                format!(
-                    "Make sure you follow the 'name' command with a space and then your name.{}",
-                    Command::name.example()
-                )
+        Command::name => match process_name(words) {
+            Ok(name) => {
+                query!("update users set name = ? where number = ?", name, from)
+                    .execute(pool)
+                    .await?;
+                format!("Your name has been updated to '{name}'")
             }
-        }
+            Err(hint) => hint.to_string(),
+        },
         Command::stop => {
             query!("delete from users where number = ?", number)
                 .execute(pool)
@@ -158,7 +145,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
             let command_text = words.next();
             if let Some(command) = command_text.map(|word| Command::try_from(word)) {
                 if let Ok(command) = command {
-                    format!("{command}: {}", command.help())
+                    format!("{command}: {}", command.description())
                 } else {
                     format!("Command '{}' not recognized", command_text.unwrap())
                 }
@@ -170,12 +157,8 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
                         .collect::<Vec<_>>()
                         .join("\n")
                 );
-                let command_help_hint = format!(
-                    "Reply '{}' to see help for a command.{}",
-                    Command::h.usage(),
-                    Command::h.example()
-                );
-                format!("{available_commands}{command_help_hint}")
+                let help_usage = Command::h.usage();
+                format!("{available_commands}{help_usage}")
             }
         }
     };
@@ -190,37 +173,34 @@ async fn onboard_new_user(
 ) -> anyhow::Result<String> {
     let Some(Ok(Command::name)) = command else {
         return Ok(format!(
-            "Welcome to Sam Carey's experimental social server!\nTo participate, reply '{}' to set your name (max {MAX_NAME_LEN} characters).{}",
-            Command::name.usage(),
-            Command::name.example()
+            "Welcome to Sam Carey's experimental social server!\nTo participate:\n{}",
+            Command::name.usage()
         ));
-        // return Ok(format!(
-        //     "Welcome to Sam Carey's experimental social server!\n\
-        //     To participate, reply '{}' to set your name (max {MAX_NAME_LEN} characters).{}",
-        //     Command::name.usage(),
-        //     Command::name.example()
-        // ));
     };
-    let name = words.collect::<Vec<_>>().join(" ");
-    Ok(if !name.is_empty() {
-        if name.len() <= MAX_NAME_LEN {
+    Ok(match process_name(words) {
+        Ok(name) => {
             query!("insert into users (number, name) values (?, ?)", from, name)
                 .execute(pool)
                 .await?;
             format!("Hello, {name}! {HELP_HINT}")
-        } else {
-            format!(
-                "That name is {} characters long.\n\
-                Please shorten it to {MAX_NAME_LEN} characters or less",
-                name.len()
-            )
         }
-    } else {
-        format!(
-            "Make sure you follow the 'name' command with a space and then your name.{}",
-            Command::name.example()
-        )
+        Err(hint) => hint.to_string(),
     })
+}
+
+fn process_name<'a>(words: impl Iterator<Item = &'a str>) -> Result<String> {
+    let name = words.collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        bail!("{}", Command::name.usage());
+    }
+    if name.len() > MAX_NAME_LEN {
+        bail!(
+            "That name is {} characters long.\n\
+            Please shorten it to {MAX_NAME_LEN} characters or less.",
+            name.len()
+        );
+    }
+    Ok(name)
 }
 
 async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {

@@ -25,36 +25,43 @@ impl Display for Command {
     }
 }
 
+struct ParameterDoc {
+    example: String,
+    description: String,
+}
+
 impl Command {
-    pub fn help(&self) -> String {
-        format!(
-            "{}.{}",
-            match self {
-                Self::h => "Show a list of available commands",
-                Self::name => "Set your preferred name",
-                Self::stop => "Stop receiving messages and remove yourself from the database",
-            },
-            self.example()
-        )
+    pub fn description(&self) -> String {
+        match self {
+            Self::h => "Show a list of available commands",
+            Self::name => "Set your preferred name",
+            Self::stop => "Stop receiving messages and remove yourself from the database",
+        }
+        .to_string()
     }
-    pub fn example(&self) -> String {
-        format!(
-            "\nExample: '{}'",
-            match self {
-                Self::h => format!("h {}", Self::name),
-                Self::name => "name John S.".to_string(),
-                Self::stop => "stop".to_string(),
-            }
-        )
+    fn parameter_doc(&self) -> Option<ParameterDoc> {
+        match self {
+            Self::h => Some(ParameterDoc {
+                example: Command::name.to_string(),
+                description: "the command you want to see help for".to_string(),
+            }),
+            Self::name => Some(ParameterDoc {
+                example: "John S.".to_string(),
+                description: "your name".to_string(),
+            }),
+            Self::stop => None,
+        }
     }
     pub fn usage(&self) -> String {
-        let mut args = vec![self.to_string()];
-        match self {
-            Self::h => args.push("<command>".to_string()),
-            Self::name => args.push("<name>".to_string()),
-            Self::stop => {}
+        if let Some(ParameterDoc {
+            example,
+            description,
+        }) = self.parameter_doc()
+        {
+            format!("Reply '{self} X',\nwhere X is {description}.\nExample: {self} {example}")
+        } else {
+            format!("Reply '{self}'")
         }
-        args.join(" ").replace("<", "-").replace(">", "-")
     }
 }
 
