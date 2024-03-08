@@ -54,7 +54,7 @@ impl Command {
             Self::name => args.push("<name>".to_string()),
             Self::stop => {}
         }
-        args.join(" ").replace("<", "&lt").replace(">", "&gt")
+        args.join(" ").replace("<", "-").replace(">", "-")
     }
 }
 
