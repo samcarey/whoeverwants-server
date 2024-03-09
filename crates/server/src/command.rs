@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum Command {
     h,
     name,
+    info,
     stop,
 }
 
@@ -33,7 +34,8 @@ struct ParameterDoc {
 impl Command {
     pub fn description(&self) -> String {
         match self {
-            Self::h => "Show a list of available commands",
+            Self::h => "Show a list of available commands ",
+            Self::info => "See information about a command",
             Self::name => "Set your preferred name",
             Self::stop => "Stop receiving messages and remove yourself from the database",
         }
@@ -41,7 +43,8 @@ impl Command {
     }
     fn parameter_doc(&self) -> Option<ParameterDoc> {
         match self {
-            Self::h => Some(ParameterDoc {
+            Self::h => None,
+            Self::info => Some(ParameterDoc {
                 example: Command::name.to_string(),
                 description: "the command you want to see help for".to_string(),
             }),

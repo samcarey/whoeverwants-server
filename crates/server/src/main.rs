@@ -124,6 +124,17 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
     };
 
     let response = match command {
+        Command::h => {
+            let available_commands = format!(
+                "Available commands:\n{}\n",
+                all::<Command>()
+                    .map(|c| format!("- {c}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let help_usage = Command::h.usage();
+            format!("{available_commands}\n{help_usage}")
+        }
         Command::name => match process_name(words) {
             Ok(name) => {
                 query!("update users set name = ? where number = ?", name, from)
@@ -141,7 +152,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
             "You've been unsubscribed. Goodbye!".to_string()
         }
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
-        Command::h => {
+        Command::info => {
             let command_text = words.next();
             if let Some(command) = command_text.map(|word| Command::try_from(word)) {
                 if let Ok(command) = command {
@@ -150,15 +161,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
                     format!("Command \"{}\" not recognized", command_text.unwrap())
                 }
             } else {
-                let available_commands = format!(
-                    "Available commands:\n{}\n",
-                    all::<Command>()
-                        .map(|c| format!("- {c}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                let help_usage = Command::h.usage();
-                format!("{available_commands}\n{help_usage}")
+                Command::info.usage()
             }
         }
     };
