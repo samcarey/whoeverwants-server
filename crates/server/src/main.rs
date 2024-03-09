@@ -89,7 +89,7 @@ async fn handle_incoming_sms(
     ))
 }
 
-const HELP_HINT: &str = "Reply \"H\" to show available commands.";
+const HELP_HINT: &str = "Reply \"h\" to show available commands.";
 const MAX_NAME_LEN: usize = 20;
 
 async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
