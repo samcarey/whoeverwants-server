@@ -71,7 +71,7 @@ async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
     Form(message): Form<SmsMessage>,
 ) -> impl IntoResponse {
-    let response = match process_message(message, &pool).await {
+    let response = match process_message(&pool, message).await {
         Ok(response) => response,
         Err(error) => {
             error!("Error: {error:?}");
@@ -89,10 +89,7 @@ async fn handle_incoming_sms(
     ))
 }
 
-const HELP_HINT: &str = "Reply \"h\" to show available commands.";
-const MAX_NAME_LEN: usize = 20;
-
-async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Result<String> {
+async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Result<String> {
     let SmsMessage {
         Body: body,
         From: from,
@@ -113,17 +110,19 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
     };
 
     let Some(command) = command else {
-        return Ok(HELP_HINT.to_string());
+        return Ok(Command::h.hint());
     };
 
     let Ok(command) = command else {
         return Ok(format!(
-            "We didn't recognize that command word: \"{}\". {HELP_HINT}",
-            command_word.unwrap()
+            "We didn't recognize that command word: \"{}\". {}",
+            command_word.unwrap(),
+            Command::h.hint()
         ));
     };
 
     let response = match command {
+        // I would use HELP for the help command, but Twilio intercepts and does not relay that
         Command::h => {
             let available_commands = format!(
                 "Available commands:\n{}\n",
@@ -132,8 +131,7 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
                     .collect::<Vec<_>>()
                     .join("\n")
             );
-            let help_usage = Command::h.usage();
-            format!("{available_commands}\n{help_usage}")
+            format!("{available_commands}\n{}", Command::info.hint())
         }
         Command::name => match process_name(words) {
             Ok(name) => {
@@ -151,17 +149,21 @@ async fn process_message(message: SmsMessage, pool: &Pool<Sqlite>) -> anyhow::Re
             // They won't actually see this when using Twilio
             "You've been unsubscribed. Goodbye!".to_string()
         }
-        // I would use HELP for the help command, but Twilio intercepts and does not relay that
         Command::info => {
             let command_text = words.next();
             if let Some(command) = command_text.map(|word| Command::try_from(word)) {
                 if let Ok(command) = command {
-                    format!("{command}: {}.\n{}", command.description(), command.usage())
+                    format!(
+                        "{} to {}.{}",
+                        command.usage(),
+                        command.description(),
+                        command.example()
+                    )
                 } else {
                     format!("Command \"{}\" not recognized", command_text.unwrap())
                 }
             } else {
-                Command::info.usage()
+                Command::info.hint()
             }
         }
     };
@@ -177,7 +179,7 @@ async fn onboard_new_user(
     let Some(Ok(Command::name)) = command else {
         return Ok(format!(
             "Welcome to Sam Carey's experimental social server!\nTo participate:\n{}",
-            Command::name.usage()
+            Command::name.hint()
         ));
     };
     Ok(match process_name(words) {
@@ -185,7 +187,7 @@ async fn onboard_new_user(
             query!("insert into users (number, name) values (?, ?)", from, name)
                 .execute(pool)
                 .await?;
-            format!("Hello, {name}! {HELP_HINT}")
+            format!("Hello, {name}! {}", Command::h.hint())
         }
         Err(hint) => hint.to_string(),
     })
@@ -196,6 +198,7 @@ fn process_name<'a>(words: impl Iterator<Item = &'a str>) -> Result<String> {
     if name.is_empty() {
         bail!("{}", Command::name.usage());
     }
+    const MAX_NAME_LEN: usize = 20;
     if name.len() > MAX_NAME_LEN {
         bail!(
             "That name is {} characters long.\n\
@@ -219,4 +222,45 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
         .context("While sending message")?;
     trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use futures::executor::block_on;
+
+    fn fixture(pool: Pool<Sqlite>) -> impl Fn(&str) {
+        move |message: &str| {
+            println!(">'{message}'");
+            let response = block_on(process_message(
+                &pool,
+                SmsMessage {
+                    From: "TEST_NUMBER".to_string(),
+                    Body: message.to_string(),
+                },
+            ))
+            .unwrap();
+            println!("{response}\n\n");
+        }
+    }
+
+    #[sqlx::test]
+    async fn all(pool: Pool<Sqlite>) -> Result<()> {
+        let fixture = fixture(pool);
+
+        fixture("hi");
+        fixture("name Sam C.");
+        fixture("h");
+        fixture("info name");
+        fixture("info stop");
+        fixture("info  ");
+        fixture("info x");
+        fixture("info info");
+        fixture("info name x");
+        fixture("yo");
+        fixture("stop");
+        fixture("yo");
+
+        Ok(())
+    }
 }

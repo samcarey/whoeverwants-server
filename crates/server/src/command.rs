@@ -34,10 +34,10 @@ struct ParameterDoc {
 impl Command {
     pub fn description(&self) -> String {
         match self {
-            Self::h => "Show a list of available commands ",
-            Self::info => "See information about a command",
-            Self::name => "Set your preferred name",
-            Self::stop => "Stop receiving messages and remove yourself from the database",
+            Self::h => "show a list of available commands",
+            Self::info => "see information about a command",
+            Self::name => "set your preferred name",
+            Self::stop => "stop receiving messages and remove yourself from the database",
         }
         .to_string()
     }
@@ -46,7 +46,7 @@ impl Command {
             Self::h => None,
             Self::info => Some(ParameterDoc {
                 example: Command::name.to_string(),
-                description: "the command you want to see help for".to_string(),
+                description: "a command".to_string(),
             }),
             Self::name => Some(ParameterDoc {
                 example: "John S.".to_string(),
@@ -56,15 +56,24 @@ impl Command {
         }
     }
     pub fn usage(&self) -> String {
-        if let Some(ParameterDoc {
-            example,
-            description,
-        }) = self.parameter_doc()
-        {
-            format!("Reply \"{self} X\", where X is {description}.\nExample: \"{self} {example}\".")
+        if let Some(ParameterDoc { description, .. }) = self.parameter_doc() {
+            format!("Reply \"{self} X\", where X is {description}")
         } else {
             format!("Reply \"{self}\"")
         }
+    }
+    pub fn example(&self) -> String {
+        self.parameter_doc()
+            .map(|ParameterDoc { example, .. }| format!("\nExample: \"{self} {example}\""))
+            .unwrap_or_default()
+    }
+    pub fn hint(&self) -> String {
+        format!(
+            "{}, to {}.{}",
+            self.usage(),
+            self.description(),
+            self.example()
+        )
     }
 }
 
