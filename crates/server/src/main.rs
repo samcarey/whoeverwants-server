@@ -115,7 +115,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 
     let Ok(command) = command else {
         return Ok(format!(
-            "We didn't recognize that command word: \"{}\". {}",
+            "We didn't recognize that command word: \"{}\".\n{}",
             command_word.unwrap(),
             Command::h.hint()
         ));
