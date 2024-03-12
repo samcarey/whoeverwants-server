@@ -229,7 +229,7 @@ mod test {
     use super::*;
     use futures::executor::block_on;
 
-    fn fixture(pool: Pool<Sqlite>) -> impl Fn(&str) {
+    fn create_fixture(pool: Pool<Sqlite>) -> impl Fn(&str) {
         move |message: &str| {
             println!(">'{message}'");
             let response = block_on(process_message(
@@ -244,23 +244,46 @@ mod test {
         }
     }
 
+    fn conversation(pool: Pool<Sqlite>, input: &[&str]) {
+        let fixture = create_fixture(pool);
+        for i in input {
+            fixture(i);
+        }
+    }
+
     #[sqlx::test]
-    async fn all(pool: Pool<Sqlite>) -> Result<()> {
-        let fixture = fixture(pool);
+    async fn basic(pool: Pool<Sqlite>) {
+        conversation(
+            pool,
+            &[
+                "hi",
+                "name Sam C.",
+                "h",
+                "info name",
+                "info stop",
+                "info  ",
+                "info x",
+                "info info",
+                "info name x",
+                "yo",
+                "stop",
+                "yo",
+            ],
+        );
+    }
 
-        fixture("hi");
-        fixture("name Sam C.");
-        fixture("h");
-        fixture("info name");
-        fixture("info stop");
-        fixture("info  ");
-        fixture("info x");
-        fixture("info info");
-        fixture("info name x");
-        fixture("yo");
-        fixture("stop");
-        fixture("yo");
-
-        Ok(())
+    #[sqlx::test]
+    async fn manage_friends(pool: Pool<Sqlite>) {
+        conversation(
+            pool,
+            &[
+                "name Sam C.",
+                "info friend",
+                "friend",
+                "info unfriend",
+                "unfriend",
+                "friend 8174548595",
+            ],
+        );
     }
 }
