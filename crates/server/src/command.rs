@@ -11,6 +11,12 @@ pub(crate) enum Command {
     name,
     info,
     stop,
+    friend,
+    unfriend,
+    accept,
+    reject,
+    block,
+    unblock,
 }
 
 impl TryFrom<&str> for Command {
@@ -38,6 +44,12 @@ impl Command {
             Self::info => "see information about a command",
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
+            Self::friend => "send friend request(s) to number(s)",
+            Self::unfriend => "remove numbers from your friends list",
+            Self::accept => "accept a friend request",
+            Self::reject => "reject a friend request",
+            Self::block => "reject a friend request and block the sender",
+            Self::unblock => "unblock a user",
         }
         .to_string()
     }
@@ -52,19 +64,44 @@ impl Command {
                 example: "John S.".to_string(),
                 description: "your name".to_string(),
             }),
+            Self::friend => Some(ParameterDoc {
+                example: "+18175551234".to_string(),
+                description: "a phone number to send a friend request to".to_string(),
+            }),
+            Self::unfriend => Some(ParameterDoc {
+                example: "1".to_string(),
+                description: format!(
+                    "the index of the friend to remove from your friends list\n\
+                    Reply just '{self}' to see a list of your friends"
+                ),
+            }),
+            Self::accept | Self::reject | Self::block => Some(ParameterDoc {
+                example: "1".to_string(),
+                description: format!(
+                    "the index corresponding to the friend request.\n\
+                    Reply just '{self}' without an index to see a list of requests."
+                ),
+            }),
+            Command::unblock => Some(ParameterDoc {
+                example: "1".to_string(),
+                description: format!(
+                    "the index corresponding to the blocked user.\n\
+                    Reply just '{self}' without an index to see a list of blocked users."
+                ),
+            }),
             Self::stop => None,
         }
     }
     pub fn usage(&self) -> String {
         if let Some(ParameterDoc { description, .. }) = self.parameter_doc() {
-            format!("Reply \"{self} X\", where X is {description}")
+            format!("Reply '{self} X', where X is {description}")
         } else {
-            format!("Reply \"{self}\"")
+            format!("Reply '{self}'")
         }
     }
     pub fn example(&self) -> String {
         self.parameter_doc()
-            .map(|ParameterDoc { example, .. }| format!("\nExample: \"{self} {example}\""))
+            .map(|ParameterDoc { example, .. }| format!("\nExample: '{self} {example}'"))
             .unwrap_or_default()
     }
     pub fn hint(&self) -> String {

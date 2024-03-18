@@ -14,9 +14,13 @@ use openapi::apis::{
 use sqlx::{query, query_as, Pool, Sqlite};
 use std::env;
 
-use crate::command::Command;
+use crate::{
+    command::Command,
+    friends::{accept, friend},
+};
 
 mod command;
+mod friends;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,7 +43,8 @@ async fn main() -> Result<()> {
     let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
     let app = Router::new()
         .route("/", post(handle_incoming_sms))
-        .layer(Extension(pool));
+        .layer(Extension(pool))
+        .layer(Extension(twilio_config));
     let listener = tokio::net::TcpListener::bind(format!(
         "{}:{}",
         env::var("CALLBACK_IP")?,
@@ -61,17 +66,22 @@ struct SmsMessage {
 }
 
 struct User {
-    number: String,
     #[allow(dead_code)]
+    number: String,
     name: String,
+}
+
+struct RowId {
+    rowid: i64,
 }
 
 // Handler for incoming SMS messages
 async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
+    Extension(twilio_config): Extension<Configuration>,
     Form(message): Form<SmsMessage>,
 ) -> impl IntoResponse {
-    let response = match process_message(&pool, message).await {
+    let response = match process_message(&pool, Some(&twilio_config), message).await {
         Ok(response) => response,
         Err(error) => {
             error!("Error: {error:?}");
@@ -89,7 +99,11 @@ async fn handle_incoming_sms(
     ))
 }
 
-async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Result<String> {
+async fn process_message(
+    pool: &Pool<Sqlite>,
+    twilio_config: Option<&Configuration>,
+    message: SmsMessage,
+) -> anyhow::Result<String> {
     let SmsMessage {
         Body: body,
         From: from,
@@ -100,9 +114,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     let command_word = words.next();
     let command = command_word.map(|word| Command::try_from(word));
 
-    let Some(User {
-        number, name: _, ..
-    }) = query_as!(User, "select * from users where number = ?", from)
+    let Some(User { name, .. }) = query_as!(User, "select * from users where number = ?", from)
         .fetch_optional(pool)
         .await?
     else {
@@ -115,7 +127,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 
     let Ok(command) = command else {
         return Ok(format!(
-            "We didn't recognize that command word: \"{}\".\n{}",
+            "We didn't recognize that command word: '{}'.\n{}",
             command_word.unwrap(),
             Command::h.hint()
         ));
@@ -138,21 +150,20 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 query!("update users set name = ? where number = ?", name, from)
                     .execute(pool)
                     .await?;
-                format!("Your name has been updated to \"{name}\"")
+                format!("Your name has been updated to '{name}'")
             }
             Err(hint) => hint.to_string(),
         },
         Command::stop => {
-            query!("delete from users where number = ?", number)
+            query!("delete from users where number = ?", from)
                 .execute(pool)
                 .await?;
             // They won't actually see this when using Twilio
             "You've been unsubscribed. Goodbye!".to_string()
         }
         Command::info => {
-            let command_text = words.next();
-            if let Some(command) = command_text.map(|word| Command::try_from(word)) {
-                if let Ok(command) = command {
+            if let Some(command_word) = words.next() {
+                if let Ok(command) = Command::try_from(command_word) {
                     format!(
                         "{} to {}.{}",
                         command.usage(),
@@ -160,14 +171,58 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                         command.example()
                     )
                 } else {
-                    format!("Command \"{}\" not recognized", command_text.unwrap())
+                    format!("Command '{command_word}' not recognized")
                 }
             } else {
-                Command::info.hint()
+                command.hint()
             }
         }
+        Command::friend => {
+            if let Some(friend_number) = words.next() {
+                query!("begin transaction").execute(pool).await?;
+                let response = friend(pool, twilio_config, &name, &from, friend_number).await?;
+                query!("commit").execute(pool).await?;
+                response
+            } else {
+                command.hint()
+            }
+        }
+        Command::unfriend => {
+            if let Some(friend_index) = words.next() {
+                if let Err(error) = query_as!(
+                    RowId,
+                    "delete from friend_requests where rowid = ?",
+                    friend_index
+                )
+                .execute(pool)
+                .await
+                {
+                    error!("{error}");
+                    "Failed to remove friend!"
+                } else {
+                    "Successfully removed friend"
+                }
+                .to_string()
+            } else {
+                command.hint()
+            }
+        }
+        Command::accept => {
+            if let Some(request_index) = words.next().and_then(|x| x.parse().ok()) {
+                query!("begin transaction").execute(pool).await?;
+                let response = accept(pool, twilio_config, &name, &from, request_index).await?;
+                query!("commit").execute(pool).await?;
+                response
+            } else {
+                command.hint()
+            }
+        }
+        // Command::reject => {}
+        // Command::block => {}
+        // Command::requests => {}
+        _ => "".to_string(),
     };
-    Ok(response)
+    Ok(response.replace("'", "\""))
 }
 
 async fn onboard_new_user(
@@ -229,13 +284,16 @@ mod test {
     use super::*;
     use futures::executor::block_on;
 
-    fn create_fixture(pool: Pool<Sqlite>) -> impl Fn(&str) {
+    fn create_fixture(pool: &Pool<Sqlite>, number: &str) -> impl Fn(&str) {
+        let number = number.to_string();
+        let pool = pool.clone();
         move |message: &str| {
-            println!(">'{message}'");
+            println!("{number} >>> '{message}'");
             let response = block_on(process_message(
                 &pool,
+                None,
                 SmsMessage {
-                    From: "TEST_NUMBER".to_string(),
+                    From: number.to_string(),
                     Body: message.to_string(),
                 },
             ))
@@ -244,8 +302,8 @@ mod test {
         }
     }
 
-    fn conversation(pool: Pool<Sqlite>, input: &[&str]) {
-        let fixture = create_fixture(pool);
+    fn one_sided(pool: Pool<Sqlite>, input: &[&str]) {
+        let fixture = create_fixture(&pool, "TEST_NUMBER");
         for i in input {
             fixture(i);
         }
@@ -253,7 +311,7 @@ mod test {
 
     #[sqlx::test]
     async fn basic(pool: Pool<Sqlite>) {
-        conversation(
+        one_sided(
             pool,
             &[
                 "hi",
@@ -274,16 +332,11 @@ mod test {
 
     #[sqlx::test]
     async fn manage_friends(pool: Pool<Sqlite>) {
-        conversation(
-            pool,
-            &[
-                "name Sam C.",
-                "info friend",
-                "friend",
-                "info unfriend",
-                "unfriend",
-                "friend 8174548595",
-            ],
-        );
+        let a = create_fixture(&pool, "A");
+        let b = create_fixture(&pool, "B");
+        a("name Sam C.");
+        a("friend B");
+        b("accept");
+        b("accept 1");
     }
 }
