@@ -16,7 +16,7 @@ use std::env;
 
 use crate::{
     command::Command,
-    friends::{accept, friend},
+    friends::{accept, friend, reject},
 };
 
 mod command;
@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
     send(
-        &twilio_config,
+        Some(&twilio_config),
         env::var("CLIENT_NUMBER")?,
         "Server is starting up".to_string(),
     )
@@ -73,6 +73,12 @@ struct User {
 
 struct RowId {
     rowid: i64,
+}
+
+struct Friendship {
+    rowid: i64,
+    number_a: String,
+    number_b: String,
 }
 
 // Handler for incoming SMS messages
@@ -133,9 +139,11 @@ async fn process_message(
         ));
     };
 
-    let response = match command {
+    query!("begin transaction").execute(pool).await?;
+
+    let response = match (command, words.next()) {
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
-        Command::h => {
+        (Command::h, _) => {
             let available_commands = format!(
                 "Available commands:\n{}\n",
                 all::<Command>()
@@ -145,7 +153,7 @@ async fn process_message(
             );
             format!("{available_commands}\n{}", Command::info.hint())
         }
-        Command::name => match process_name(words) {
+        (Command::name, _) => match process_name(words) {
             Ok(name) => {
                 query!("update users set name = ? where number = ?", name, from)
                     .execute(pool)
@@ -154,74 +162,115 @@ async fn process_message(
             }
             Err(hint) => hint.to_string(),
         },
-        Command::stop => {
+        (Command::stop, _) => {
             query!("delete from users where number = ?", from)
                 .execute(pool)
                 .await?;
             // They won't actually see this when using Twilio
             "You've been unsubscribed. Goodbye!".to_string()
         }
-        Command::info => {
-            if let Some(command_word) = words.next() {
-                if let Ok(command) = Command::try_from(command_word) {
-                    format!(
-                        "{} to {}.{}",
-                        command.usage(),
-                        command.description(),
-                        command.example()
-                    )
-                } else {
-                    format!("Command '{command_word}' not recognized")
-                }
-            } else {
-                command.hint()
-            }
-        }
-        Command::friend => {
-            if let Some(friend_number) = words.next() {
-                query!("begin transaction").execute(pool).await?;
-                let response = friend(pool, twilio_config, &name, &from, friend_number).await?;
-                query!("commit").execute(pool).await?;
-                response
-            } else {
-                command.hint()
-            }
-        }
-        Command::unfriend => {
-            if let Some(friend_index) = words.next() {
-                if let Err(error) = query_as!(
-                    RowId,
-                    "delete from friend_requests where rowid = ?",
-                    friend_index
+        (Command::info, Some(command_word)) => {
+            if let Ok(command) = Command::try_from(command_word) {
+                format!(
+                    "{} to {}.{}",
+                    command.usage(),
+                    command.description(),
+                    command.example()
                 )
-                .execute(pool)
-                .await
-                {
-                    error!("{error}");
-                    "Failed to remove friend!"
-                } else {
-                    "Successfully removed friend"
+            } else {
+                format!("Command '{command_word}' not recognized")
+            }
+        }
+        (Command::friend, Some(friend_number)) => {
+            // Look for all combos of number, and sanitize
+            friend(pool, twilio_config, &name, &from, friend_number).await?
+        }
+        (Command::unfriend, Some(friend_index)) => {
+            // todo only compare index once
+            if let Some(Friendship {
+                rowid,
+                number_a,
+                number_b,
+            }) = query_as!(
+                Friendship,
+                "select rowid, number_a, number_b from friendships where \
+                (number_a, rowid) = (?, ?) or \
+                (number_b, rowid) = (?, ?)",
+                from,
+                friend_index,
+                from,
+                friend_index
+            )
+            .fetch_optional(pool)
+            .await?
+            {
+                let friend_number = if number_a == from { number_b } else { number_a };
+                let friend_name = query!("select name from users where number = ?", friend_number)
+                    .fetch_one(pool)
+                    .await?
+                    .name;
+                query!("delete from friendships where rowid = ?", rowid)
+                    .execute(pool)
+                    .await?;
+                format!("Removed {friend_name} ({friend_number}) as a friend")
+            } else {
+                format!("Failed to find that friendship")
+            }
+        }
+        (Command::unfriend, None) => {
+            let results = query_as!(
+                Friendship,
+                "select rowid, number_a, number_b from friendships where \
+                number_a = ? or number_b = ?",
+                from,
+                from,
+            )
+            .fetch_all(pool)
+            .await?;
+            let mut friends = Vec::with_capacity(results.len());
+            for Friendship {
+                rowid,
+                number_a,
+                number_b,
+            } in results
+            {
+                let friend_number = if number_a == from { number_b } else { number_a };
+                let friend_name = query!("select name from users where number = ?", friend_number)
+                    .fetch_one(pool)
+                    .await?
+                    .name;
+                friends.push(format!("{rowid}: {friend_name}"));
+            }
+            format!("Friendships:\n{}", friends.join("\n"))
+        }
+        (Command::accept | Command::reject | Command::block, Some(request_index)) => {
+            if let Ok(request_index) = request_index.parse() {
+                match command {
+                    Command::accept => {
+                        accept(pool, twilio_config, &name, &from, request_index).await?
+                    }
+                    Command::reject => reject(pool, &from, request_index).await?,
+                    Command::block => {
+                        unimplemented!()
+                    }
+                    _ => unreachable!(),
                 }
-                .to_string()
             } else {
                 command.hint()
             }
         }
-        Command::accept => {
-            if let Some(request_index) = words.next().and_then(|x| x.parse().ok()) {
-                query!("begin transaction").execute(pool).await?;
-                let response = accept(pool, twilio_config, &name, &from, request_index).await?;
-                query!("commit").execute(pool).await?;
-                response
-            } else {
-                command.hint()
-            }
+        (Command::unblock, Some(request_index)) => {
+            unimplemented!()
         }
-        // Command::reject => {}
-        // Command::block => {}
-        // Command::requests => {}
-        _ => "".to_string(),
+        (Command::unblock, None) => {
+            unimplemented!()
+        }
+        (Command::accept | Command::reject | Command::block, None) => {
+            unimplemented!()
+        }
+        (command, None) => command.hint(),
     };
+    query!("commit").execute(pool).await?;
     Ok(response.replace("'", "\""))
 }
 
@@ -264,18 +313,22 @@ fn process_name<'a>(words: impl Iterator<Item = &'a str>) -> Result<String> {
     Ok(name)
 }
 
-async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
-    let message_params = CreateMessageParams {
-        account_sid: env::var("TWILIO_ACCOUNT_SID")?,
-        to,
-        from: Some(env::var("SERVER_NUMBER")?),
-        body: Some(message),
-        ..Default::default()
-    };
-    let message = create_message(twilio_config, message_params)
-        .await
-        .context("While sending message")?;
-    trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
+async fn send(twilio_config: Option<&Configuration>, to: String, message: String) -> Result<()> {
+    if let Some(twilio_config) = twilio_config {
+        let message_params = CreateMessageParams {
+            account_sid: env::var("TWILIO_ACCOUNT_SID")?,
+            to,
+            from: Some(env::var("SERVER_NUMBER")?),
+            body: Some(message),
+            ..Default::default()
+        };
+        let message = create_message(twilio_config, message_params)
+            .await
+            .context("While sending message")?;
+        trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
+    } else {
+        println!("To ({to}): {message}\n\n");
+    }
     Ok(())
 }
 

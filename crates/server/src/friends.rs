@@ -27,38 +27,55 @@ pub async fn accept(
         else {
             return Ok("Friend request not found".to_string());
         };
-        query_as!(
-            RowId,
-            "insert into friends (number_a, number_b) values (?, ?)",
+
+        query!(
+            "insert into friendships (number_a, number_b) values (?, ?)",
             sender,
             from,
         )
         .execute(pool)
         .await?;
+
         query!(
-            "insert into friends (number_a, number_b) values (?, ?)",
+            "delete from friend_requests where \
+            (sender, recipient) = (?, ?) \
+            or (recipient, sender) = (?, ?)",
             sender,
             from,
+            from,
+            sender,
         )
         .execute(pool)
         .await?;
-        query!(
-                    "delete from friend_requests where (sender, recipient) = (?, ?) or (recipient, sender) = (?, ?)",
-                    sender,
-                    from,
-                    from,
-                    sender,
-                )
-                .execute(pool)
-                .await?;
 
         let message = format!("{name} has accepted your friend request!");
-        if let Some(twilio_config) = twilio_config {
-            send(twilio_config, sender.clone(), message).await?;
-        } else {
-            println!("To ({sender}): {message}\n\n");
-        }
+        send(twilio_config, sender.clone(), message).await?;
         format!("You a now friends with {sender}")
+    })
+}
+
+pub async fn reject(pool: &Pool<Sqlite>, from: &str, request_index: i64) -> anyhow::Result<String> {
+    Ok({
+        let Some(Request { sender }) = query_as!(
+            Request,
+            "select sender from friend_requests where (recipient, rowid) = (?, ?)",
+            from,
+            request_index
+        )
+        .fetch_optional(pool)
+        .await?
+        else {
+            return Ok("Friend request not found".to_string());
+        };
+        query!(
+            "delete from friend_requests where \
+            (sender, recipient) = (?, ?)",
+            sender,
+            from,
+        )
+        .execute(pool)
+        .await?;
+        format!("Rejected friend request from {sender}")
     })
 }
 
@@ -71,7 +88,7 @@ pub async fn friend(
 ) -> anyhow::Result<String> {
     Ok({
         if query!(
-            "select count(*) as count from friends where \
+            "select count(*) as count from friendships where \
             (number_a, number_b) = (?, ?) or \
             (number_b, number_a) = (?, ?)",
             friend_number,
@@ -131,11 +148,7 @@ pub async fn friend(
                     "Friend request received from {name} ({from}). \
                     Reply 'accept {rowid}', 'reject {rowid}', or 'block {rowid}'"
                 );
-                if let Some(twilio_config) = twilio_config {
-                    send(twilio_config, friend_number.to_string(), message).await?;
-                } else {
-                    println!("To ({friend_number}): {message}\n\n");
-                }
+                send(twilio_config, friend_number.to_string(), message).await?;
                 "Friend request sent!".to_string()
             }
             Err(error) => {

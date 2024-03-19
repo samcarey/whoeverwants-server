@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 // variants must be all lowercase for serde_json to deserialize them
 #[allow(non_camel_case_types)]
-#[derive(Deserialize, Serialize, Sequence, Debug)]
+#[derive(Deserialize, Serialize, Sequence, Debug, Clone, Copy)]
 pub(crate) enum Command {
     h,
     name,
