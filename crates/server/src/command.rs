@@ -11,6 +11,7 @@ pub(crate) enum Command {
     name,
     info,
     stop,
+    friends,
 }
 
 impl TryFrom<&str> for Command {
@@ -38,6 +39,7 @@ impl Command {
             Self::info => "see information about a command",
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
+            Self::friends => "see a list of your stored contacts",
         }
         .to_string()
     }
@@ -53,6 +55,7 @@ impl Command {
                 description: "your name".to_string(),
             }),
             Self::stop => None,
+            Self::friends => None,
         }
     }
     pub fn usage(&self) -> String {

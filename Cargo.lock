@@ -1024,6 +1024,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ical"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "356d82bd58997815d55ea6f9081bd4cac149e50ca943f7a4f7c050fec7271c1f"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1814,8 +1823,10 @@ dependencies = [
  "enum-iterator",
  "env_logger",
  "futures",
+ "ical",
  "log",
  "openapi",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

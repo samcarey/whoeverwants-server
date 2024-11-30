@@ -54,16 +54,26 @@ async fn main() -> Result<()> {
 
 // field names must be exact (including case) to match API
 #[allow(non_snake_case)]
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default, Debug)]
 struct SmsMessage {
     Body: String,
     From: String,
+    NumMedia: Option<String>,
+    MediaContentType0: Option<String>,
+    MediaUrl0: Option<String>,
 }
 
 struct User {
     number: String,
     #[allow(dead_code)]
     name: String,
+}
+
+struct Contact {
+    #[allow(unused)]
+    id: i64,
+    contact_name: String,
+    contact_number: String,
 }
 
 // Handler for incoming SMS messages
@@ -90,11 +100,52 @@ async fn handle_incoming_sms(
 }
 
 async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Result<String> {
+    trace!("Received {message:?}");
     let SmsMessage {
         Body: body,
         From: from,
+        NumMedia,
+        MediaContentType0,
+        MediaUrl0,
     } = message;
     debug!("Received from {from}: {body}");
+    if NumMedia == Some("1".to_string())
+        && MediaContentType0
+            .map(|t| ["text/vcard", "text/x-vcard"].contains(&&t.as_str()))
+            .unwrap_or(false)
+    {
+        let vcard_data = reqwest::get(&MediaUrl0.unwrap()).await?.text().await?;
+        let reader = ical::VcardParser::new(vcard_data.as_bytes());
+        for vcard in reader {
+            let card = vcard?;
+            let Some(name) = card
+                .properties
+                .iter()
+                .find(|p| p.name == "FN")
+                .and_then(|p| p.value.as_ref())
+            else {
+                return Ok("Failed to add contact--no name provided".to_string());
+            };
+            let Some(number) = card
+                .properties
+                .iter()
+                .find(|p| p.name == "TEL")
+                .and_then(|p| p.value.as_ref())
+            else {
+                return Ok("Failed to add contact--no number provided".to_string());
+            };
+            query!(
+                "INSERT INTO contacts (submitter_number, contact_name, contact_number) 
+                 VALUES (?, ?, ?)",
+                from,
+                name,
+                number
+            )
+            .execute(pool)
+            .await?;
+        }
+        return Ok("Contact added successfully".to_string());
+    }
 
     let mut words = body.trim().split_ascii_whitespace();
     let command_word = words.next();
@@ -164,6 +215,34 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 }
             } else {
                 Command::info.hint()
+            }
+        }
+        Command::friends => {
+            let contacts = query_as!(
+                Contact,
+                "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE submitter_number = ? ORDER BY contact_name",
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+
+            if contacts.is_empty() {
+                "You haven't added any contacts yet.".to_string()
+            } else {
+                let contact_list = contacts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        format!(
+                            "{}. {} ({})",
+                            i + 1,
+                            c.contact_name,
+                            &c.contact_number[2..5]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Your contacts:\n{}", contact_list)
             }
         }
     };
@@ -238,6 +317,7 @@ mod test {
                 SmsMessage {
                     From: "TEST_NUMBER".to_string(),
                     Body: message.to_string(),
+                    ..Default::default()
                 },
             ))
             .unwrap();
