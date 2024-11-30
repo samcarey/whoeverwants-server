@@ -1,0 +1,25 @@
+env_files = ["./.env"]
+
+[config]
+default_to_workspace = false
+
+
+[tasks.dev]
+command = "ssh"
+args = [
+    "-p",
+    "443",
+    "-R0:localhost:56010",
+    "-L4300:localhost:4300",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "ServerAliveInterval=30",
+    "wrr0fLztB5P@us.a.pinggy.io",
+]
+
+[tasks.noproxy]
+script = """
+export http_proxy=""
+export https_proxy=""
+"""
