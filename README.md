@@ -12,4 +12,5 @@ Terminal 1:
 1. `cargo make dev`
 
 Terminal 2:
+`cargo make setup-db`
 `cargo run`

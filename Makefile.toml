@@ -23,3 +23,7 @@ script = """
 export http_proxy=""
 export https_proxy=""
 """
+
+[tasks.setup-db]
+command = "sqlx"
+args = ["db", "setup", "--source", "crates/server/migrations"]
