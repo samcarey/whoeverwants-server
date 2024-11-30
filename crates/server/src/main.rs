@@ -178,7 +178,8 @@ async fn onboard_new_user(
 ) -> anyhow::Result<String> {
     let Some(Ok(Command::name)) = command else {
         return Ok(format!(
-            "Welcome to Sam Carey's experimental social server!\nTo participate:\n{}",
+            "Greetings! This is Decision Bot (https://github.com/samcarey/decisionbot).\n\
+            To participate:\n{}",
             Command::name.hint()
         ));
     };
