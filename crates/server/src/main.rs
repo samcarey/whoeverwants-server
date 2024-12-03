@@ -6,6 +6,7 @@ use axum::{
 };
 use dotenv::dotenv;
 use enum_iterator::all;
+use ical::parser::vcard::component::VcardContact;
 use log::*;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -116,35 +117,18 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     {
         let vcard_data = reqwest::get(&MediaUrl0.unwrap()).await?.text().await?;
         let reader = ical::VcardParser::new(vcard_data.as_bytes());
+        let mut stats = ImportStats::default();
+
         for vcard in reader {
-            let card = vcard?;
-            let Some(name) = card
-                .properties
-                .iter()
-                .find(|p| p.name == "FN")
-                .and_then(|p| p.value.as_ref())
-            else {
-                return Ok("Failed to add contact--no name provided".to_string());
-            };
-            let Some(number) = card
-                .properties
-                .iter()
-                .find(|p| p.name == "TEL")
-                .and_then(|p| p.value.as_ref())
-            else {
-                return Ok("Failed to add contact--no number provided".to_string());
-            };
-            query!(
-                "INSERT INTO contacts (submitter_number, contact_name, contact_number) 
-                 VALUES (?, ?, ?)",
-                from,
-                name,
-                number
-            )
-            .execute(pool)
-            .await?;
+            match process_vcard(pool, &from, vcard).await {
+                Ok(ImportResult::Added) => stats.added += 1,
+                Ok(ImportResult::Updated) => stats.updated += 1,
+                Ok(ImportResult::Unchanged) => stats.skipped += 1,
+                Err(e) => stats.add_error(&e.to_string()),
+            }
         }
-        return Ok("Contact added successfully".to_string());
+
+        return Ok(stats.format_report());
     }
 
     let mut words = body.trim().split_ascii_whitespace();
@@ -249,6 +233,73 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     Ok(response)
 }
 
+enum ImportResult {
+    Added,
+    Updated,
+    Unchanged,
+}
+
+async fn process_vcard(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    vcard: Result<VcardContact, ical::parser::ParserError>,
+) -> anyhow::Result<ImportResult> {
+    let card = vcard?;
+
+    let name = card
+        .properties
+        .iter()
+        .find(|p| p.name == "FN")
+        .and_then(|p| p.value.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("No name provided"))?;
+
+    let number = card
+        .properties
+        .iter()
+        .find(|p| p.name == "TEL")
+        .and_then(|p| p.value.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("No number provided"))?;
+
+    // First check if contact exists with different name
+    let existing = query!(
+        "SELECT contact_name FROM contacts 
+         WHERE submitter_number = ? AND contact_number = ?",
+        from,
+        number
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match existing {
+        Some(row) if row.contact_name == *name => Ok(ImportResult::Unchanged),
+        Some(_) => {
+            query!(
+                "UPDATE contacts 
+                 SET contact_name = ?
+                 WHERE submitter_number = ? AND contact_number = ?",
+                name,
+                from,
+                number
+            )
+            .execute(pool)
+            .await?;
+            Ok(ImportResult::Updated)
+        }
+        None => {
+            query!(
+                "INSERT INTO contacts (submitter_number, contact_name, contact_number) 
+                 VALUES (?, ?, ?)",
+                from,
+                name,
+                number
+            )
+            .execute(pool)
+            .await?;
+            Ok(ImportResult::Added)
+        }
+    }
+}
+
 async fn onboard_new_user(
     command: Option<Result<Command, serde_json::Error>>,
     words: impl Iterator<Item = &str>,
@@ -302,6 +353,36 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
         .context("While sending message")?;
     trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
     Ok(())
+}
+#[derive(Default)]
+struct ImportStats {
+    added: usize,
+    updated: usize,
+    skipped: usize,
+    failed: usize,
+    errors: std::collections::HashMap<String, usize>,
+}
+
+impl ImportStats {
+    fn add_error(&mut self, error: &str) {
+        *self.errors.entry(error.to_string()).or_insert(0) += 1;
+        self.failed += 1;
+    }
+
+    fn format_report(&self) -> String {
+        let mut report = format!(
+            "Processed contacts: {} added, {} updated, {} unchanged, {} failed",
+            self.added, self.updated, self.skipped, self.failed
+        );
+
+        if !self.errors.is_empty() {
+            report.push_str("\nErrors encountered:");
+            for (error, count) in &self.errors {
+                report.push_str(&format!("\n- {} × {}", count, error));
+            }
+        }
+        report
+    }
 }
 
 #[cfg(test)]
