@@ -27,3 +27,8 @@ export https_proxy=""
 [tasks.setup-db]
 command = "sqlx"
 args = ["db", "setup", "--source", "crates/server/migrations"]
+
+[tasks.run]
+env = { http_proxy = "", https_proxy = "" }
+command = "cargo"
+args = ["run"]
