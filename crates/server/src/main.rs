@@ -207,7 +207,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 Command::info.hint()
             }
         }
-        Command::friends => {
+        Command::contacts => {
             let contacts = query_as!(
                 Contact,
                 "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE submitter_number = ? ORDER BY contact_name",

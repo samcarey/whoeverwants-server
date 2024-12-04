@@ -11,7 +11,7 @@ pub(crate) enum Command {
     name,
     info,
     stop,
-    friends,
+    contacts,
     delete,
     confirm,
 }
@@ -40,7 +40,7 @@ impl Command {
             Self::info => "see information about a command",
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
-            Self::friends => "see a list of your stored contacts",
+            Self::contacts => "see a list of your stored contacts",
             Self::delete => "delete a contact by name",
             Self::confirm => "confirm deletion of a contact",
         }
@@ -67,7 +67,7 @@ impl Command {
                 description: "number from the deletion list".to_string(),
             }),
             Self::stop => None,
-            Self::friends => None,
+            Self::contacts => None,
         }
     }
     pub fn usage(&self) -> String {
