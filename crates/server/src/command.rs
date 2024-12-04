@@ -12,6 +12,8 @@ pub(crate) enum Command {
     info,
     stop,
     friends,
+    delete,
+    confirm,
 }
 
 impl TryFrom<&str> for Command {
@@ -31,7 +33,6 @@ struct ParameterDoc {
     example: String,
     description: String,
 }
-
 impl Command {
     pub fn description(&self) -> String {
         match self {
@@ -40,9 +41,12 @@ impl Command {
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
             Self::friends => "see a list of your stored contacts",
+            Self::delete => "delete a contact by name",
+            Self::confirm => "confirm deletion of a contact",
         }
         .to_string()
     }
+
     fn parameter_doc(&self) -> Option<ParameterDoc> {
         match self {
             Self::h => None,
@@ -54,13 +58,21 @@ impl Command {
                 example: "John S.".to_string(),
                 description: "your name".to_string(),
             }),
+            Self::delete => Some(ParameterDoc {
+                example: "John".to_string(),
+                description: "contact name to delete".to_string(),
+            }),
+            Self::confirm => Some(ParameterDoc {
+                example: "2".to_string(),
+                description: "number from the deletion list".to_string(),
+            }),
             Self::stop => None,
             Self::friends => None,
         }
     }
     pub fn usage(&self) -> String {
         if let Some(ParameterDoc { description, .. }) = self.parameter_doc() {
-            format!("Reply \"{self} X\", where X is {description}")
+            format!("Reply \"{self} X\", where X is {description},")
         } else {
             format!("Reply \"{self}\"")
         }

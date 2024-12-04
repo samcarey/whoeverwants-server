@@ -1,3 +1,4 @@
+use crate::command::Command;
 use anyhow::{bail, Context, Result};
 use axum::{
     response::{Html, IntoResponse},
@@ -8,16 +9,20 @@ use dotenv::dotenv;
 use enum_iterator::all;
 use ical::parser::vcard::component::VcardContact;
 use log::*;
+use once_cell::sync::Lazy;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
 };
 use sqlx::{query, query_as, Pool, Sqlite};
+use std::collections::HashMap;
 use std::env;
-
-use crate::command::Command;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 mod command;
+#[cfg(test)]
+mod test;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -70,6 +75,7 @@ struct User {
     name: String,
 }
 
+#[derive(Clone)]
 struct Contact {
     #[allow(unused)]
     id: i64,
@@ -229,8 +235,141 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 format!("Your contacts:\n{}", contact_list)
             }
         }
+        Command::delete => {
+            let name = words.collect::<Vec<_>>().join(" ");
+            if name.is_empty() {
+                Command::delete.hint()
+            } else {
+                handle_delete(pool, &from, &name).await?
+            }
+        }
+        Command::confirm => {
+            let num = words.next();
+            match num {
+                Some(num) => handle_confirm(pool, &from, num).await?,
+                None => Command::confirm.hint(),
+            }
+        }
     };
     Ok(response)
+}
+
+async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
+    cleanup_pending_deletions();
+
+    let like = format!("%{}%", name.to_lowercase());
+    let contacts = query_as!(
+        Contact,
+        "SELECT id as \"id!\", contact_name, contact_number 
+         FROM contacts 
+         WHERE submitter_number = ? 
+         AND LOWER(contact_name) LIKE ?
+         ORDER BY contact_name",
+        from,
+        like
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if contacts.is_empty() {
+        return Ok(format!("No contacts found matching \"{}\"", name));
+    }
+
+    let list = contacts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            format!(
+                "{}. {} ({})",
+                i + 1,
+                c.contact_name,
+                &c.contact_number[2..5]
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let response = format!(
+        "Found these contacts matching \"{}\":\n{}\n\nTo delete, reply \"confirm NUM\", where NUM is a number from the list above.",
+        name, list
+    );
+
+    // For each contact, generate a unique token and store the deletion request
+    for (i, contact) in contacts.iter().enumerate() {
+        let token = format!("{}:{}", from, i + 1);
+        PENDING_DELETIONS.lock().unwrap().insert(
+            token,
+            PendingDeletion {
+                contact_id: contact.id,
+                timestamp: Instant::now(),
+            },
+        );
+    }
+
+    Ok(response)
+}
+
+async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, num: &str) -> anyhow::Result<String> {
+    let token = format!("{}:{}", from, num);
+
+    // Get and remove the pending deletion in a single atomic operation
+    let contact_id = {
+        let mut deletions = PENDING_DELETIONS.lock().unwrap();
+        match deletions.remove(&token) {
+            Some(PendingDeletion {
+                contact_id,
+                timestamp,
+            }) if timestamp.elapsed() <= DELETION_TIMEOUT => {
+                // Remove all other pending deletions for this user
+                deletions.retain(|k, _| !k.starts_with(&format!("{}:", from)));
+                Some(contact_id)
+            }
+            _ => None,
+        }
+    };
+
+    let Some(contact_id) = contact_id else {
+        return Ok(
+            "Invalid or expired deletion request. Please try again with \"delete NAME\"."
+                .to_string(),
+        );
+    };
+
+    // Fetch the contact details before deletion for the confirmation message
+    let contact = query_as!(
+        Contact,
+        "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE id = ? AND submitter_number = ?",
+        contact_id,
+        from
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(contact) = contact else {
+        return Ok("Contact no longer exists.".to_string());
+    };
+
+    // Delete the contact
+    query!(
+        "DELETE FROM contacts WHERE id = ? AND submitter_number = ?",
+        contact_id,
+        from
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(format!(
+        "Deleted contact: {} ({})",
+        contact.contact_name,
+        &contact.contact_number[2..5]
+    ))
+}
+
+fn cleanup_pending_deletions() {
+    PENDING_DELETIONS
+        .lock()
+        .unwrap()
+        .retain(|_, deletion| deletion.timestamp.elapsed() <= DELETION_TIMEOUT);
 }
 
 enum ImportResult {
@@ -385,44 +524,12 @@ impl ImportStats {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use futures::executor::block_on;
-
-    fn fixture(pool: Pool<Sqlite>) -> impl Fn(&str) {
-        move |message: &str| {
-            println!(">'{message}'");
-            let response = block_on(process_message(
-                &pool,
-                SmsMessage {
-                    From: "TEST_NUMBER".to_string(),
-                    Body: message.to_string(),
-                    ..Default::default()
-                },
-            ))
-            .unwrap();
-            println!("{response}\n\n");
-        }
-    }
-
-    #[sqlx::test]
-    async fn all(pool: Pool<Sqlite>) -> Result<()> {
-        let fixture = fixture(pool);
-
-        fixture("hi");
-        fixture("name Sam C.");
-        fixture("h");
-        fixture("info name");
-        fixture("info stop");
-        fixture("info  ");
-        fixture("info x");
-        fixture("info info");
-        fixture("info name x");
-        fixture("yo");
-        fixture("stop");
-        fixture("yo");
-
-        Ok(())
-    }
+struct PendingDeletion {
+    contact_id: i64,
+    timestamp: Instant,
 }
+
+static PENDING_DELETIONS: Lazy<Mutex<HashMap<String, PendingDeletion>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const DELETION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
