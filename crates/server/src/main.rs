@@ -195,7 +195,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
             if let Some(command) = command_text.map(|word| Command::try_from(word)) {
                 if let Ok(command) = command {
                     format!(
-                        "{} to {}.{}",
+                        "{}, to {}.{}",
                         command.usage(),
                         command.description(),
                         command.example()

@@ -72,7 +72,7 @@ impl Command {
     }
     pub fn usage(&self) -> String {
         if let Some(ParameterDoc { description, .. }) = self.parameter_doc() {
-            format!("Reply \"{self} X\", where X is {description},")
+            format!("Reply \"{self} X\", where X is {description}")
         } else {
             format!("Reply \"{self}\"")
         }
