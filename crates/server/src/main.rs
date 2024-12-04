@@ -244,10 +244,11 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
             }
         }
         Command::confirm => {
-            let num = words.next();
-            match num {
-                Some(num) => handle_confirm(pool, &from, num).await?,
-                None => Command::confirm.hint(),
+            let nums = words.collect::<Vec<_>>().join(" ");
+            if nums.is_empty() {
+                Command::confirm.hint()
+            } else {
+                handle_confirm(pool, &from, &nums).await?
             }
         }
     };
@@ -290,7 +291,9 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         .join("\n");
 
     let response = format!(
-        "Found these contacts matching \"{}\":\n{}\n\nTo delete, reply \"confirm NUM\", where NUM is a number from the list above.",
+        "Found these contacts matching \"{}\":\n{}\n\n\
+        To delete multiple contacts, reply \"confirm NUM1 NUM2 ...\", \
+        where NUM1, NUM2, etc. are numbers from the list above.",
         name, list
     );
 
@@ -309,60 +312,99 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     Ok(response)
 }
 
-async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, num: &str) -> anyhow::Result<String> {
-    let token = format!("{}:{}", from, num);
+async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyhow::Result<String> {
+    let nums: Vec<&str> = nums_str.split_whitespace().collect();
+    if nums.is_empty() {
+        return Ok("Please provide at least one number from the list.".to_string());
+    }
 
-    // Get and remove the pending deletion in a single atomic operation
-    let contact_id = {
-        let mut deletions = PENDING_DELETIONS.lock().unwrap();
-        match deletions.remove(&token) {
-            Some(PendingDeletion {
-                contact_id,
-                timestamp,
-            }) if timestamp.elapsed() <= DELETION_TIMEOUT => {
-                // Remove all other pending deletions for this user
-                deletions.retain(|k, _| !k.starts_with(&format!("{}:", from)));
-                Some(contact_id)
+    let mut deleted_contacts = Vec::new();
+    let mut failed_nums = Vec::new();
+
+    for num in nums {
+        let token = format!("{}:{}", from, num);
+
+        let contact_id = {
+            let mut deletions = PENDING_DELETIONS.lock().unwrap();
+            match deletions.remove(&token) {
+                Some(PendingDeletion {
+                    contact_id,
+                    timestamp,
+                }) if timestamp.elapsed() <= DELETION_TIMEOUT => Some(contact_id),
+                _ => None,
             }
-            _ => None,
+        };
+
+        if let Some(contact_id) = contact_id {
+            if let Ok(Some(contact)) = query_as!(
+                Contact,
+                "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE id = ? AND submitter_number = ?",
+                contact_id,
+                from
+            )
+            .fetch_optional(pool)
+            .await
+            {
+                if query!(
+                    "DELETE FROM contacts WHERE id = ? AND submitter_number = ?",
+                    contact_id,
+                    from
+                )
+                .execute(pool)
+                .await
+                .is_ok()
+                {
+                    deleted_contacts.push(format!(
+                        "{} ({})",
+                        contact.contact_name,
+                        &contact.contact_number[2..5]
+                    ));
+                } else {
+                    failed_nums.push(num.to_string());
+                }
+            } else {
+                failed_nums.push(num.to_string());
+            }
+        } else {
+            failed_nums.push(num.to_string());
         }
+    }
+
+    {
+        let mut deletions = PENDING_DELETIONS.lock().unwrap();
+        deletions.retain(|k, v| {
+            !k.starts_with(&format!("{}:", from)) || v.timestamp.elapsed() <= DELETION_TIMEOUT
+        });
+    }
+
+    let mut response = if deleted_contacts.is_empty() {
+        "No contacts were deleted.".to_string()
+    } else {
+        let bullet_list = deleted_contacts
+            .iter()
+            .map(|contact| format!("• {}", contact))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            "Deleted {} contact{}:\n{}",
+            deleted_contacts.len(),
+            if deleted_contacts.len() == 1 { "" } else { "s" },
+            bullet_list
+        )
     };
 
-    let Some(contact_id) = contact_id else {
-        return Ok(
-            "Invalid or expired deletion request. Please try again with \"delete NAME\"."
-                .to_string(),
-        );
-    };
+    if !failed_nums.is_empty() {
+        response.push_str(&format!(
+            "\nFailed to delete number{}: {}",
+            if failed_nums.len() == 1 { "" } else { "s" },
+            failed_nums.join(", ")
+        ));
+        response
+            .push_str("\nThese numbers may be invalid or the deletion request may have expired.");
+    }
 
-    // Fetch the contact details before deletion for the confirmation message
-    let contact = query_as!(
-        Contact,
-        "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE id = ? AND submitter_number = ?",
-        contact_id,
-        from
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(contact) = contact else {
-        return Ok("Contact no longer exists.".to_string());
-    };
-
-    // Delete the contact
-    query!(
-        "DELETE FROM contacts WHERE id = ? AND submitter_number = ?",
-        contact_id,
-        from
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(format!(
-        "Deleted contact: {} ({})",
-        contact.contact_name,
-        &contact.contact_number[2..5]
-    ))
+    Ok(response)
 }
 
 fn cleanup_pending_deletions() {

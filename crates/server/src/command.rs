@@ -42,7 +42,7 @@ impl Command {
             Self::stop => "stop receiving messages and remove yourself from the database",
             Self::contacts => "see a list of your stored contacts",
             Self::delete => "delete a contact by name",
-            Self::confirm => "confirm deletion of a contact",
+            Self::confirm => "confirm pending action(s)",
         }
         .to_string()
     }
@@ -63,8 +63,8 @@ impl Command {
                 description: "contact name to delete".to_string(),
             }),
             Self::confirm => Some(ParameterDoc {
-                example: "2".to_string(),
-                description: "number from the deletion list".to_string(),
+                example: "2,3".to_string(),
+                description: "number(s) from a list of pending actions".to_string(),
             }),
             Self::stop => None,
             Self::contacts => None,
