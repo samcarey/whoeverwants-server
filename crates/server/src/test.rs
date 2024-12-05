@@ -94,7 +94,7 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
     assert!(response.contains("haven't added any contacts yet"));
 
     // Add a contact through vcard
-    let vcard_data = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+1987654321\nEND:VCARD\n";
+    let vcard_data = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+19876543210\nEND:VCARD\n";
     let mut reader = ical::VcardParser::new(vcard_data.as_bytes());
     let vcard = reader.next().unwrap();
     let result = process_vcard(&pool, "+1234567890", vcard).await?;

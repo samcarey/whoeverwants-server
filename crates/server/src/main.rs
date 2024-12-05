@@ -15,14 +15,16 @@ use openapi::apis::{
     configuration::Configuration,
 };
 use sqlx::{query, query_as, Pool, Sqlite};
-use std::collections::HashMap;
 use std::env;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use std::{collections::HashMap, str::FromStr};
+use util::E164;
 
 mod command;
 #[cfg(test)]
 mod test;
+mod util;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -78,7 +80,6 @@ struct User {
 
 #[derive(Clone)]
 struct Contact {
-    #[allow(unused)]
     id: i64,
     contact_name: String,
     contact_number: String,
@@ -228,7 +229,9 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                             "{}. {} ({})",
                             i + 1,
                             c.contact_name,
-                            &c.contact_number[2..5]
+                            &E164::from_str(&c.contact_number)
+                                .expect("Should have been formatted upon db insertion")
+                                .area_code()
                         )
                     })
                     .collect::<Vec<_>>()
@@ -281,12 +284,11 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            format!(
-                "{}. {} ({})",
-                i + 1,
-                c.contact_name,
-                &c.contact_number[2..5]
-            )
+            let area_code = E164::from_str(&c.contact_number)
+                .map(|e| e.area_code().to_string())
+                .unwrap_or_else(|_| "???".to_string());
+
+            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -358,7 +360,7 @@ async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyh
                     deleted_contacts.push(format!(
                         "{} ({})",
                         contact.contact_name,
-                        &contact.contact_number[2..5]
+                        &E164::from_str(&contact.contact_number).unwrap().area_code()
                     ));
                 } else {
                     failed_nums.push(num.to_string());
@@ -421,7 +423,6 @@ enum ImportResult {
     Updated,
     Unchanged,
 }
-
 async fn process_vcard(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -444,12 +445,17 @@ async fn process_vcard(
         .and_then(|p| p.value.as_ref())
         .ok_or_else(|| anyhow::anyhow!("No name provided"))?;
 
-    let number = card
+    let raw_number = card
         .properties
         .iter()
         .find(|p| p.name == "TEL")
         .and_then(|p| p.value.as_ref())
         .ok_or_else(|| anyhow::anyhow!("No number provided"))?;
+
+    // Normalize the phone number
+    let number = E164::from_str(raw_number)
+        .map_err(|_| anyhow::anyhow!("Invalid phone number format"))?
+        .to_string();
 
     // First check if contact exists with different name
     let existing = query!(
