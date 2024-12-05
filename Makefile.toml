@@ -29,6 +29,6 @@ command = "sqlx"
 args = ["db", "setup", "--source", "crates/server/migrations"]
 
 [tasks.run]
-env = { http_proxy = "", https_proxy = "" }
+env = { http_proxy = "", https_proxy = "", RUST_LOG = "debug" }
 command = "cargo"
 args = ["run"]
