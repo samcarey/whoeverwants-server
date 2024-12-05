@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
+    query!("PRAGMA foreign_keys = ON").execute(&pool).await?; // SQLite has this off by default
     let app = Router::new()
         .route("/", post(handle_incoming_sms))
         .layer(Extension(pool));
