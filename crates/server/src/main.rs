@@ -414,6 +414,7 @@ fn cleanup_pending_deletions() {
         .retain(|_, deletion| deletion.timestamp.elapsed() <= DELETION_TIMEOUT);
 }
 
+#[derive(Debug)]
 enum ImportResult {
     Added,
     Updated,
@@ -425,6 +426,14 @@ async fn process_vcard(
     from: &str,
     vcard: Result<VcardContact, ical::parser::ParserError>,
 ) -> anyhow::Result<ImportResult> {
+    let user_exists = query!("SELECT * FROM users WHERE number = ?", from)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+    if !user_exists {
+        bail!("Please set your name first using the 'name' command before adding contacts");
+    }
+
     let card = vcard?;
 
     let name = card
