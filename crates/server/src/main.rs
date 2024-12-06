@@ -132,11 +132,12 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 Ok(ImportResult::Added) => stats.added += 1,
                 Ok(ImportResult::Updated) => stats.updated += 1,
                 Ok(ImportResult::Unchanged) => stats.skipped += 1,
+                Ok(ImportResult::Deferred) => stats.deferred += 1,
                 Err(e) => stats.add_error(&e.to_string()),
             }
         }
 
-        return Ok(stats.format_report());
+        return Ok(stats.format_report(&from));
     }
 
     let mut words = body.trim().split_ascii_whitespace();
@@ -219,7 +220,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
             .await?;
 
             if contacts.is_empty() {
-                "You haven't added any contacts yet.".to_string()
+                "You don't have any contacts.".to_string()
             } else {
                 let contact_list = contacts
                     .iter()
@@ -255,9 +256,132 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 handle_confirm(pool, &from, &nums).await?
             }
         }
+        Command::pick => {
+            let nums = words.collect::<Vec<_>>().join(" ");
+            if nums.is_empty() {
+                Command::pick.hint()
+            } else {
+                handle_pick(pool, &from, &nums).await?
+            }
+        }
     };
     Ok(response)
 }
+
+async fn handle_pick(pool: &Pool<Sqlite>, from: &str, selections: &str) -> anyhow::Result<String> {
+    // Get the deferred contacts while holding the lock
+    let deferred_contacts = {
+        let mut deferred_map = DEFERRED_CONTACTS.lock().unwrap();
+
+        // Clean up expired contacts while we have the lock
+        deferred_map.retain(|_, contacts| {
+            contacts.retain(|c| c.timestamp.elapsed() <= DEFERRED_TIMEOUT);
+            !contacts.is_empty()
+        });
+
+        // Clone the contacts we need so we can release the lock
+        deferred_map.get(from).map(|contacts| contacts.clone())
+    };
+
+    let Some(deferred_contacts) = deferred_contacts else {
+        return Ok("No pending contacts to pick from.".to_string());
+    };
+
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
+
+    // Parse selections like "1a, 2b, 3a"
+    for selection in selections.split(',').map(str::trim) {
+        if selection.len() < 2 {
+            failed.push(format!("Invalid selection format: {}", selection));
+            continue;
+        }
+
+        // Split into numeric and letter parts
+        let (num_str, letter) = selection.split_at(selection.len() - 1);
+        let contact_idx: usize = match num_str.parse::<usize>() {
+            Ok(n) if n > 0 => n - 1,
+            _ => {
+                failed.push(format!("Invalid contact number: {}", num_str));
+                continue;
+            }
+        };
+
+        let letter_idx = match letter.chars().next().unwrap() {
+            c @ 'a'..='z' => (c as u8 - b'a') as usize,
+            _ => {
+                failed.push(format!("Invalid letter selection: {}", letter));
+                continue;
+            }
+        };
+
+        // Get the contact and number
+        let contact = match deferred_contacts.get(contact_idx) {
+            Some(c) => c,
+            None => {
+                failed.push(format!("Contact number {} not found", contact_idx + 1));
+                continue;
+            }
+        };
+
+        let (number, _) = match contact.numbers.get(letter_idx) {
+            Some(n) => n,
+            None => {
+                failed.push(format!(
+                    "Number {} not found for contact {}",
+                    letter,
+                    contact_idx + 1
+                ));
+                continue;
+            }
+        };
+
+        // Insert the contact
+        if let Err(e) = add_contact(pool, from, &contact.name, number).await {
+            failed.push(format!(
+                "Failed to add {} ({}): {}",
+                contact.name, number, e
+            ));
+        } else {
+            successful.push(format!("{} ({})", contact.name, number));
+        }
+    }
+
+    // Remove processed contacts after we're done
+    {
+        if let Ok(mut deferred_map) = DEFERRED_CONTACTS.lock() {
+            if let Some(contacts) = deferred_map.get_mut(from) {
+                contacts.retain(|_| false);
+            }
+        }
+    }
+
+    // Format response
+    let mut response = String::new();
+    if !successful.is_empty() {
+        response.push_str(&format!(
+            "Successfully added {} contact{}:\n",
+            successful.len(),
+            if successful.len() == 1 { "" } else { "s" }
+        ));
+        for contact in successful {
+            response.push_str(&format!("• {}\n", contact));
+        }
+    }
+
+    if !failed.is_empty() {
+        if !response.is_empty() {
+            response.push_str("\n");
+        }
+        response.push_str("Failed to process:\n");
+        for error in failed {
+            response.push_str(&format!("• {}\n", error));
+        }
+    }
+
+    Ok(response)
+}
+
 async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
     cleanup_pending_deletions();
 
@@ -310,99 +434,136 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     Ok(response)
 }
 
-async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyhow::Result<String> {
-    let nums: Vec<&str> = nums_str.split(",").map(|n| n.trim()).collect();
-    if nums.is_empty() {
-        return Ok("Please provide at least one number from the list.".to_string());
-    }
+async fn handle_confirm(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    selections: &str,
+) -> anyhow::Result<String> {
+    cleanup_pending_deletions();
 
-    let mut deleted_contacts = Vec::new();
-    let mut failed_nums = Vec::new();
+    // Collect deletion IDs and release the lock immediately
+    let to_delete = {
+        let pending = PENDING_DELETIONS.lock().unwrap();
+        let mut ids = Vec::new();
+        let mut invalid = Vec::new();
 
-    for num in nums {
-        let token = format!("{}:{}", from, num);
-
-        let contact_id = {
-            let mut deletions = PENDING_DELETIONS.lock().unwrap();
-            match deletions.remove(&token) {
-                Some(PendingDeletion {
-                    contact_id,
-                    timestamp,
-                }) if timestamp.elapsed() <= DELETION_TIMEOUT => Some(contact_id),
-                _ => None,
-            }
-        };
-
-        if let Some(contact_id) = contact_id {
-            if let Ok(Some(contact)) = query_as!(
-                Contact,
-                "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE id = ? AND submitter_number = ?",
-                contact_id,
-                from
-            )
-            .fetch_optional(pool)
-            .await
-            {
-                if query!(
-                    "DELETE FROM contacts WHERE id = ? AND submitter_number = ?",
-                    contact_id,
-                    from
-                )
-                .execute(pool)
-                .await
-                .is_ok()
-                {
-                    deleted_contacts.push(format!(
-                        "{} ({})",
-                        contact.contact_name,
-                        &E164::from_str(&contact.contact_user_number).unwrap().area_code()
-                    ));
-                } else {
-                    failed_nums.push(num.to_string());
+        for num_str in selections.split(',').map(str::trim) {
+            match num_str.parse::<usize>() {
+                Ok(num) if num > 0 => {
+                    let token = format!("{}:{}", from, num);
+                    if let Some(deletion) = pending.get(&token) {
+                        ids.push(deletion.contact_id);
+                    } else {
+                        invalid.push(format!("Invalid selection: {}", num));
+                    }
                 }
-            } else {
-                failed_nums.push(num.to_string());
+                _ => invalid.push(format!("Invalid number: {}", num_str)),
             }
-        } else {
-            failed_nums.push(num.to_string());
+        }
+
+        if ids.is_empty() {
+            if invalid.is_empty() {
+                return Ok("No valid selections provided.".to_string());
+            } else {
+                return Ok(format!("Errors:\n{}", invalid.join("\n")));
+            }
+        }
+
+        (ids, invalid)
+    };
+
+    let (to_delete, invalid) = to_delete;
+
+    // Fetch contact details before deletion
+    let mut contacts = Vec::new();
+    for id in &to_delete {
+        if let Some(contact) = query_as!(
+            Contact,
+            "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE id = ?",
+            id
+        )
+        .fetch_optional(pool)
+        .await?
+        {
+            contacts.push(contact);
         }
     }
 
+    // Perform deletions
+    let mut tx = pool.begin().await?;
+    for id in to_delete {
+        query!("DELETE FROM contacts WHERE id = ?", id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    // Clear the processed deletions from pending map
     {
-        let mut deletions = PENDING_DELETIONS.lock().unwrap();
-        deletions.retain(|k, v| {
-            !k.starts_with(&format!("{}:", from)) || v.timestamp.elapsed() <= DELETION_TIMEOUT
-        });
+        let mut pending = PENDING_DELETIONS.lock().unwrap();
+        for contact in &contacts {
+            pending.retain(|_, deletion| deletion.contact_id != contact.id);
+        }
     }
 
-    let mut response = if deleted_contacts.is_empty() {
-        "No contacts were deleted.".to_string()
-    } else {
-        let bullet_list = deleted_contacts
-            .iter()
-            .map(|contact| format!("• {}", contact))
-            .collect::<Vec<_>>()
-            .join("\n");
+    // Format response
+    let mut response = format!(
+        "Deleted {} contact{}:\n",
+        contacts.len(),
+        if contacts.len() == 1 { "" } else { "s" }
+    );
 
-        format!(
-            "Deleted {} contact{}:\n{}",
-            deleted_contacts.len(),
-            if deleted_contacts.len() == 1 { "" } else { "s" },
-            bullet_list
-        )
-    };
+    for contact in contacts {
+        let area_code = E164::from_str(&contact.contact_user_number)
+            .map(|e| e.area_code().to_string())
+            .unwrap_or_else(|_| "???".to_string());
+        response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
+    }
 
-    if !failed_nums.is_empty() {
-        response.push_str(&format!(
-            "\nFailed to delete number{}: {}",
-            if failed_nums.len() == 1 { "" } else { "s" },
-            failed_nums.join(", ")
-        ));
-        response
-            .push_str("\nThese numbers may be invalid or the deletion request may have expired.");
+    if !invalid.is_empty() {
+        response.push_str("\nErrors:\n");
+        response.push_str(&invalid.join("\n"));
     }
 
     Ok(response)
+}
+
+async fn add_contact(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    name: &str,
+    number: &str,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+
+    // Create user if needed
+    let contact_user = query!("SELECT * FROM users WHERE number = ?", number)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if contact_user.is_none() {
+        query!(
+            "INSERT INTO users (number, name) VALUES (?, ?)",
+            number,
+            name
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Insert contact
+    query!(
+        "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
+         VALUES (?, ?, ?)",
+        from,
+        name,
+        number
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 fn cleanup_pending_deletions() {
@@ -417,6 +578,7 @@ enum ImportResult {
     Added,
     Updated,
     Unchanged,
+    Deferred,
 }
 
 async fn process_vcard(
@@ -441,77 +603,118 @@ async fn process_vcard(
         .and_then(|p| p.value.as_ref())
         .ok_or_else(|| anyhow::anyhow!("No name provided"))?;
 
-    let raw_number = card
-        .properties
-        .iter()
-        .find(|p| p.name == "TEL")
-        .and_then(|p| p.value.as_ref())
-        .ok_or_else(|| anyhow::anyhow!("No number provided"))?;
+    // Collect all TEL properties with their types/descriptions
+    let mut numbers = Vec::new();
+    for prop in card.properties.iter().filter(|p| p.name == "TEL") {
+        if let Some(raw_number) = &prop.value {
+            if let Ok(normalized) = E164::from_str(raw_number) {
+                let description = prop.params.as_ref().and_then(|params| {
+                    params
+                        .iter()
+                        .find(|(key, _)| key.eq_ignore_ascii_case("TYPE"))
+                        .and_then(|(_, values)| values.first())
+                        .map(|v| v.to_string())
+                });
+                numbers.push((normalized.to_string(), description));
+            }
+        }
+    }
 
-    // Normalize the phone number
-    let number = E164::from_str(raw_number)
-        .map_err(|_| anyhow::anyhow!("Invalid phone number format"))?
-        .to_string();
+    if numbers.is_empty() {
+        bail!("No valid phone numbers provided");
+    }
 
-    // Begin transaction to handle user creation and contact linking
-    let mut tx = pool.begin().await?;
+    // Check existing contacts
+    let existing_contacts = query!(
+        "SELECT contact_user_number, contact_name FROM contacts WHERE submitter_number = ?",
+        from
+    )
+    .fetch_all(pool)
+    .await?;
 
-    // Check if the contact exists as a user, if not create them
-    let contact_user = query!("SELECT * FROM users WHERE number = ?", number)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let mut new_numbers = Vec::new();
+    let mut updated = false;
 
-    if contact_user.is_none() {
+    for (num, desc) in numbers {
+        if let Some(existing) = existing_contacts
+            .iter()
+            .find(|contact| contact.contact_user_number == num)
+        {
+            if existing.contact_name != *name {
+                // Update the contact's name if it changed
+                query!(
+                    "UPDATE contacts SET contact_name = ? WHERE submitter_number = ? AND contact_user_number = ?",
+                    name,
+                    from,
+                    num
+                )
+                .execute(pool)
+                .await?;
+                updated = true;
+            }
+        } else {
+            new_numbers.push((num, desc));
+        }
+    }
+
+    if new_numbers.is_empty() {
+        return Ok(if updated {
+            ImportResult::Updated
+        } else {
+            ImportResult::Unchanged
+        });
+    }
+
+    if new_numbers.len() > 1 {
+        // Store for later confirmation
+        let deferred = DeferredContact {
+            name: name.to_string(),
+            numbers: new_numbers,
+            timestamp: Instant::now(),
+        };
+
+        let mut deferred_contacts = DEFERRED_CONTACTS.lock().unwrap();
+        deferred_contacts
+            .entry(from.to_string())
+            .or_default()
+            .push(deferred);
+
+        Ok(ImportResult::Deferred)
+    } else {
+        // Single number case - proceed with insertion
+        let (number, _) = new_numbers.into_iter().next().unwrap();
+
+        let mut tx = pool.begin().await?;
+
+        // Create user if needed
+        let contact_user = query!("SELECT * FROM users WHERE number = ?", number)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        if contact_user.is_none() {
+            query!(
+                "INSERT INTO users (number, name) VALUES (?, ?)",
+                number,
+                name
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Insert contact
         query!(
-            "INSERT INTO users (number, name) VALUES (?, ?)",
-            number,
-            name
+            "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
+             VALUES (?, ?, ?)",
+            from,
+            name,
+            number
         )
         .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
+        Ok(ImportResult::Added)
     }
-
-    // Check if contact relationship already exists
-    let existing = query!(
-        "SELECT contact_name FROM contacts 
-         WHERE submitter_number = ? AND contact_user_number = ?",
-        from,
-        number
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let result = match existing {
-        Some(row) if row.contact_name == *name => ImportResult::Unchanged,
-        Some(_) => {
-            query!(
-                "UPDATE contacts 
-                 SET contact_name = ?
-                 WHERE submitter_number = ? AND contact_user_number = ?",
-                name,
-                from,
-                number
-            )
-            .execute(&mut *tx)
-            .await?;
-            ImportResult::Updated
-        }
-        None => {
-            query!(
-                "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
-                 VALUES (?, ?, ?)",
-                from,
-                name,
-                number
-            )
-            .execute(&mut *tx)
-            .await?;
-            ImportResult::Added
-        }
-    };
-
-    tx.commit().await?;
-    Ok(result)
 }
 
 async fn onboard_new_user(
@@ -568,12 +771,27 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
     trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
     Ok(())
 }
+// Add these new types to the top of main.rs
+#[derive(Debug, Clone)]
+struct DeferredContact {
+    name: String,
+    numbers: Vec<(String, Option<String>)>, // (number, description) pairs
+    timestamp: Instant,
+}
+
+static DEFERRED_CONTACTS: Lazy<Mutex<HashMap<String, Vec<DeferredContact>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const DEFERRED_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+
+// Update ImportStats to include deferred count
 #[derive(Default)]
 struct ImportStats {
     added: usize,
     updated: usize,
     skipped: usize,
     failed: usize,
+    deferred: usize,
     errors: std::collections::HashMap<String, usize>,
 }
 
@@ -583,16 +801,38 @@ impl ImportStats {
         self.failed += 1;
     }
 
-    fn format_report(&self) -> String {
+    fn format_report(&self, from: &str) -> String {
         let mut report = format!(
-            "Processed contacts: {} added, {} updated, {} unchanged, {} failed",
-            self.added, self.updated, self.skipped, self.failed
+            "Processed contacts: {} added, {} updated, {} unchanged, {} deferred, {} failed",
+            self.added, self.updated, self.skipped, self.deferred, self.failed
         );
 
         if !self.errors.is_empty() {
             report.push_str("\nErrors encountered:");
             for (error, count) in &self.errors {
                 report.push_str(&format!("\n- {} × {}", count, error));
+            }
+        }
+
+        if self.deferred > 0 {
+            // Add list of deferred contacts
+            if let Ok(deferred_map) = DEFERRED_CONTACTS.lock() {
+                if let Some(deferred) = deferred_map.get(from) {
+                    report.push_str(
+                        "\n\nThe following contacts have multiple numbers. \
+                        Reply with \"pick NA, MB, ...\" \
+                        where N and M are from the list of contacts below \
+                        and A and B are the letters for the desired phone numbers for each.\n",
+                    );
+                    for (i, contact) in deferred.iter().enumerate() {
+                        report.push_str(&format!("\n{}. {}", i + 1, contact.name));
+                        for (j, (number, description)) in contact.numbers.iter().enumerate() {
+                            let letter = (b'a' + j as u8) as char;
+                            let desc = description.as_deref().unwrap_or("no description");
+                            report.push_str(&format!("\n   {}. {} ({})", letter, number, desc));
+                        }
+                    }
+                }
             }
         }
         report
