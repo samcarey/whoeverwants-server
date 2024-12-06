@@ -290,7 +290,7 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
 
     let response = format!(
         "Found these contacts matching \"{}\":\n{}\n\n\
-        To delete multiple contacts, reply \"confirm NUM1 NUM2 ...\", \
+        To delete contacts, reply \"confirm NUM1, NUM2, ...\", \
         where NUM1, NUM2, etc. are numbers from the list above.",
         name, list
     );
@@ -311,7 +311,7 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
 }
 
 async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyhow::Result<String> {
-    let nums: Vec<&str> = nums_str.split_whitespace().collect();
+    let nums: Vec<&str> = nums_str.split(",").map(|n| n.trim()).collect();
     if nums.is_empty() {
         return Ok("Please provide at least one number from the list.".to_string());
     }
