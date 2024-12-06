@@ -148,7 +148,7 @@ async fn test_user_deletion(pool: Pool<Sqlite>) -> Result<()> {
     // Verify contacts were deleted due to foreign key constraint
     let contacts = query_as!(
         Contact,
-        "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE submitter_number = ?",
+        "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE submitter_number = ?",
         "+1234567890"
     )
     .fetch_all(&pool)

@@ -82,7 +82,7 @@ struct User {
 struct Contact {
     id: i64,
     contact_name: String,
-    contact_number: String,
+    contact_user_number: String,
 }
 
 // Handler for incoming SMS messages
@@ -212,7 +212,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         Command::contacts => {
             let contacts = query_as!(
                 Contact,
-                "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE submitter_number = ? ORDER BY contact_name",
+                "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE submitter_number = ? ORDER BY contact_name",
                 from
             )
             .fetch_all(pool)
@@ -229,7 +229,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                             "{}. {} ({})",
                             i + 1,
                             c.contact_name,
-                            &E164::from_str(&c.contact_number)
+                            &E164::from_str(&c.contact_user_number)
                                 .expect("Should have been formatted upon db insertion")
                                 .area_code()
                         )
@@ -258,14 +258,13 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     };
     Ok(response)
 }
-
 async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
     cleanup_pending_deletions();
 
     let like = format!("%{}%", name.to_lowercase());
     let contacts = query_as!(
         Contact,
-        "SELECT id as \"id!\", contact_name, contact_number 
+        "SELECT id as \"id!\", contact_name, contact_user_number 
          FROM contacts 
          WHERE submitter_number = ? 
          AND LOWER(contact_name) LIKE ?
@@ -276,15 +275,11 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     .fetch_all(pool)
     .await?;
 
-    if contacts.is_empty() {
-        return Ok(format!("No contacts found matching \"{}\"", name));
-    }
-
     let list = contacts
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let area_code = E164::from_str(&c.contact_number)
+            let area_code = E164::from_str(&c.contact_user_number)
                 .map(|e| e.area_code().to_string())
                 .unwrap_or_else(|_| "???".to_string());
 
@@ -341,7 +336,7 @@ async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyh
         if let Some(contact_id) = contact_id {
             if let Ok(Some(contact)) = query_as!(
                 Contact,
-                "SELECT id as \"id!\", contact_name, contact_number FROM contacts WHERE id = ? AND submitter_number = ?",
+                "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE id = ? AND submitter_number = ?",
                 contact_id,
                 from
             )
@@ -360,7 +355,7 @@ async fn handle_confirm(pool: &Pool<Sqlite>, from: &str, nums_str: &str) -> anyh
                     deleted_contacts.push(format!(
                         "{} ({})",
                         contact.contact_name,
-                        &E164::from_str(&contact.contact_number).unwrap().area_code()
+                        &E164::from_str(&contact.contact_user_number).unwrap().area_code()
                     ));
                 } else {
                     failed_nums.push(num.to_string());
@@ -423,6 +418,7 @@ enum ImportResult {
     Updated,
     Unchanged,
 }
+
 async fn process_vcard(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -457,44 +453,65 @@ async fn process_vcard(
         .map_err(|_| anyhow::anyhow!("Invalid phone number format"))?
         .to_string();
 
-    // First check if contact exists with different name
+    // Begin transaction to handle user creation and contact linking
+    let mut tx = pool.begin().await?;
+
+    // Check if the contact exists as a user, if not create them
+    let contact_user = query!("SELECT * FROM users WHERE number = ?", number)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    if contact_user.is_none() {
+        query!(
+            "INSERT INTO users (number, name) VALUES (?, ?)",
+            number,
+            name
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // Check if contact relationship already exists
     let existing = query!(
         "SELECT contact_name FROM contacts 
-         WHERE submitter_number = ? AND contact_number = ?",
+         WHERE submitter_number = ? AND contact_user_number = ?",
         from,
         number
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    match existing {
-        Some(row) if row.contact_name == *name => Ok(ImportResult::Unchanged),
+    let result = match existing {
+        Some(row) if row.contact_name == *name => ImportResult::Unchanged,
         Some(_) => {
             query!(
                 "UPDATE contacts 
                  SET contact_name = ?
-                 WHERE submitter_number = ? AND contact_number = ?",
+                 WHERE submitter_number = ? AND contact_user_number = ?",
                 name,
                 from,
                 number
             )
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
-            Ok(ImportResult::Updated)
+            ImportResult::Updated
         }
         None => {
             query!(
-                "INSERT INTO contacts (submitter_number, contact_name, contact_number) 
+                "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
                  VALUES (?, ?, ?)",
                 from,
                 name,
                 number
             )
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
-            Ok(ImportResult::Added)
+            ImportResult::Added
         }
-    }
+    };
+
+    tx.commit().await?;
+    Ok(result)
 }
 
 async fn onboard_new_user(
