@@ -15,6 +15,8 @@ def read_files_from_folder(folder_path):
     file_contents = []
     for root, _, files in os.walk(folder_path):
         for file in files:
+            if "target" in file or "target" in root:
+                continue
             file_path = os.path.join(root, file)
             content = read_file(file_path)
             if content is not None:
@@ -30,6 +32,7 @@ Do not try to hold a mutex lock across an await point.
 
 def main(output_file, *sources):
     all_contents = []
+    sources: list[str] = sources
     for source in sources:
         if os.path.isdir(source):
             all_contents.extend(read_files_from_folder(source))
