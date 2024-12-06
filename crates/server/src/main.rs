@@ -120,7 +120,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     debug!("Received from {from}: {body}");
     if NumMedia == Some("1".to_string())
         && MediaContentType0
-            .map(|t| ["text/vcard", "text/x-vcard"].contains(&&t.as_str()))
+            .map(|t| ["text/vcard", "text/x-vcard"].contains(&t.as_str()))
             .unwrap_or(false)
     {
         let vcard_data = reqwest::get(&MediaUrl0.unwrap()).await?.text().await?;
@@ -141,7 +141,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 
     let mut words = body.trim().split_ascii_whitespace();
     let command_word = words.next();
-    let command = command_word.map(|word| Command::try_from(word));
+    let command = command_word.map(Command::try_from);
 
     let Some(User {
         number, name: _, ..
@@ -194,7 +194,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         }
         Command::info => {
             let command_text = words.next();
-            if let Some(command) = command_text.map(|word| Command::try_from(word)) {
+            if let Some(command) = command_text.map(Command::try_from) {
                 if let Ok(command) = command {
                     format!(
                         "{}, to {}.{}",
