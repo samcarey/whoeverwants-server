@@ -22,6 +22,12 @@ def read_files_from_folder(folder_path):
     return file_contents
 
 
+header = """
+Instructions: If you tell me a function needs to change, output the whole function, not just new pieces interleaved with old.
+Do not try to hold a mutex lock across an await point.
+"""
+
+
 def main(output_file, *sources):
     all_contents = []
     for source in sources:
@@ -50,9 +56,3 @@ if __name__ == "__main__":
         output_file = "context.md"
         sources = sys.argv[2:]
         main(output_file, *sources)
-
-
-header = """
-Instructions: If you tell me a function needs to change, output the whole function, not just new pieces interleaved with old.
-Do not try to hold a mutex lock across an await point.
-"""
