@@ -32,3 +32,7 @@ args = ["db", "setup", "--source", "crates/server/migrations"]
 env = { http_proxy = "", https_proxy = "", RUST_LOG = "debug" }
 command = "cargo"
 args = ["run"]
+
+[tasks.gather]
+command = "python3"
+args = ["gather_context.py", "context.md", "crates/server"]
