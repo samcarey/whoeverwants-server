@@ -330,7 +330,7 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
         let token = format!("{}:{}", from, i + 1);
         PENDING_DELETIONS.lock().unwrap().insert(
             token,
-            PendingDeletion {
+            PendingAction {
                 contact_id: contact.id,
                 timestamp: Instant::now(),
                 intent: ConfirmationIntent::AddToGroup,
@@ -499,7 +499,7 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         let token = format!("{}:{}", from, i + 1);
         PENDING_DELETIONS.lock().unwrap().insert(
             token,
-            PendingDeletion {
+            PendingAction {
                 contact_id: contact.id,
                 timestamp: Instant::now(),
                 intent: ConfirmationIntent::Delete,
@@ -1011,13 +1011,13 @@ enum ConfirmationIntent {
     AddToGroup,
 }
 
-struct PendingDeletion {
+struct PendingAction {
     contact_id: i64,
     timestamp: Instant,
     intent: ConfirmationIntent,
 }
 
-static PENDING_DELETIONS: Lazy<Mutex<HashMap<String, PendingDeletion>>> =
+static PENDING_DELETIONS: Lazy<Mutex<HashMap<String, PendingAction>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const DELETION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
