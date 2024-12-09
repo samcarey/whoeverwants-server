@@ -78,7 +78,7 @@ struct User {
     name: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, sqlx::FromRow)]
 struct Contact {
     id: i64,
     contact_name: String,
@@ -263,8 +263,85 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 handle_pick(pool, &from, &nums).await?
             }
         }
+        Command::group => {
+            let names = words.collect::<Vec<_>>().join(" ");
+            if names.is_empty() {
+                Command::group.hint()
+            } else {
+                handle_group(pool, &from, &names).await?
+            }
+        }
     };
     Ok(response)
+}
+
+async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::Result<String> {
+    cleanup_pending_deletions();
+
+    let name_fragments: Vec<_> = names.split(',').map(str::trim).collect();
+
+    if name_fragments.is_empty() {
+        return Ok("Please provide at least one name to search for.".to_string());
+    }
+
+    let mut contacts = Vec::new();
+    for fragment in &name_fragments {
+        let like = format!("%{}%", fragment.to_lowercase());
+        let mut matches = query_as!(
+            Contact,
+            "SELECT id as \"id!\", contact_name, contact_user_number 
+             FROM contacts 
+             WHERE submitter_number = ? 
+             AND LOWER(contact_name) LIKE ?
+             ORDER BY contact_name",
+            from,
+            like
+        )
+        .fetch_all(pool)
+        .await?;
+        contacts.append(&mut matches);
+    }
+
+    contacts.sort_by(|a, b| a.id.cmp(&b.id));
+    contacts.dedup_by(|a, b| a.id == b.id);
+    contacts.sort_by(|a, b| a.contact_name.cmp(&b.contact_name));
+
+    if contacts.is_empty() {
+        return Ok(format!(
+            "No contacts found matching: {}",
+            name_fragments.join(", ")
+        ));
+    }
+
+    let list = contacts
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let area_code = E164::from_str(&c.contact_user_number)
+                .map(|e| e.area_code().to_string())
+                .unwrap_or_else(|_| "???".to_string());
+
+            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for (i, contact) in contacts.iter().enumerate() {
+        let token = format!("{}:{}", from, i + 1);
+        PENDING_DELETIONS.lock().unwrap().insert(
+            token,
+            PendingDeletion {
+                contact_id: contact.id,
+                timestamp: Instant::now(),
+                intent: ConfirmationIntent::AddToGroup,
+            },
+        );
+    }
+
+    Ok(format!(
+        "Found these contacts:\n{}\n\nTo create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"",
+        list
+    ))
 }
 
 async fn handle_pick(pool: &Pool<Sqlite>, from: &str, selections: &str) -> anyhow::Result<String> {
@@ -401,6 +478,10 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     .fetch_all(pool)
     .await?;
 
+    if contacts.is_empty() {
+        return Ok(format!("No contacts found matching \"{}\"", name));
+    }
+
     let list = contacts
         .iter()
         .enumerate()
@@ -414,14 +495,6 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         .collect::<Vec<_>>()
         .join("\n");
 
-    let response = format!(
-        "Found these contacts matching \"{}\":\n{}\n\n\
-        To delete contacts, reply \"confirm NUM1, NUM2, ...\", \
-        where NUM1, NUM2, etc. are numbers from the list above.",
-        name, list
-    );
-
-    // For each contact, generate a unique token and store the deletion request
     for (i, contact) in contacts.iter().enumerate() {
         let token = format!("{}:{}", from, i + 1);
         PENDING_DELETIONS.lock().unwrap().insert(
@@ -429,11 +502,17 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
             PendingDeletion {
                 contact_id: contact.id,
                 timestamp: Instant::now(),
+                intent: ConfirmationIntent::Delete,
             },
         );
     }
 
-    Ok(response)
+    Ok(format!(
+        "Found these contacts matching \"{}\":\n{}\n\n\
+        To delete contacts, reply \"confirm NUM1, NUM2, ...\", \
+        where NUM1, NUM2, etc. are numbers from the list above.",
+        name, list
+    ))
 }
 
 async fn handle_confirm(
@@ -443,18 +522,37 @@ async fn handle_confirm(
 ) -> anyhow::Result<String> {
     cleanup_pending_deletions();
 
-    // Collect deletion IDs and release the lock immediately
-    let to_delete = {
+    // First, collect all the necessary information while holding the lock
+    let (contact_ids, intent, invalid) = {
         let pending = PENDING_DELETIONS.lock().unwrap();
-        let mut ids = Vec::new();
+        let mut selected_items = Vec::new();
         let mut invalid = Vec::new();
+        let mut intent = None;
 
+        // Process all selections and collect the data
         for num_str in selections.split(',').map(str::trim) {
             match num_str.parse::<usize>() {
                 Ok(num) if num > 0 => {
                     let token = format!("{}:{}", from, num);
                     if let Some(deletion) = pending.get(&token) {
-                        ids.push(deletion.contact_id);
+                        selected_items.push(deletion.contact_id);
+                        if intent.is_none() {
+                            intent = Some(match deletion.intent {
+                                ConfirmationIntent::Delete => ConfirmationIntent::Delete,
+                                ConfirmationIntent::AddToGroup => ConfirmationIntent::AddToGroup,
+                            });
+                        } else if !matches!(
+                            (&deletion.intent, intent.as_ref().unwrap()),
+                            (ConfirmationIntent::Delete, ConfirmationIntent::Delete)
+                                | (
+                                    ConfirmationIntent::AddToGroup,
+                                    ConfirmationIntent::AddToGroup
+                                )
+                        ) {
+                            invalid.push(
+                                "Cannot mix deletion and group creation selections".to_string(),
+                            );
+                        }
                     } else {
                         invalid.push(format!("Invalid selection: {}", num));
                     }
@@ -463,22 +561,19 @@ async fn handle_confirm(
             }
         }
 
-        if ids.is_empty() {
-            if invalid.is_empty() {
-                return Ok("No valid selections provided.".to_string());
-            } else {
-                return Ok(format!("Errors:\n{}", invalid.join("\n")));
-            }
+        if selected_items.is_empty() && invalid.is_empty() {
+            return Ok("No valid selections provided.".to_string());
         }
 
-        (ids, invalid)
+        (
+            selected_items,
+            intent.unwrap_or(ConfirmationIntent::Delete),
+            invalid,
+        )
     };
 
-    let (to_delete, invalid) = to_delete;
-
-    // Fetch contact details before deletion
     let mut contacts = Vec::new();
-    for id in &to_delete {
+    for id in &contact_ids {
         if let Some(contact) = query_as!(
             Contact,
             "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE id = ?",
@@ -491,16 +586,103 @@ async fn handle_confirm(
         }
     }
 
-    // Perform deletions
-    let mut tx = pool.begin().await?;
-    for id in to_delete {
-        query!("DELETE FROM contacts WHERE id = ?", id)
-            .execute(&mut *tx)
-            .await?;
+    match intent {
+        ConfirmationIntent::AddToGroup => create_group(pool, from, contacts, invalid).await,
+        ConfirmationIntent::Delete => {
+            let mut tx = pool.begin().await?;
+            for id in contact_ids {
+                query!("DELETE FROM contacts WHERE id = ?", id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+
+            {
+                let mut pending = PENDING_DELETIONS.lock().unwrap();
+                for contact in &contacts {
+                    pending.retain(|_, deletion| deletion.contact_id != contact.id);
+                }
+            }
+
+            let mut response = format!(
+                "Deleted {} contact{}:\n",
+                contacts.len(),
+                if contacts.len() == 1 { "" } else { "s" }
+            );
+
+            for contact in contacts {
+                let area_code = E164::from_str(&contact.contact_user_number)
+                    .map(|e| e.area_code().to_string())
+                    .unwrap_or_else(|_| "???".to_string());
+                response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
+            }
+
+            if !invalid.is_empty() {
+                response.push_str("\nErrors:\n");
+                response.push_str(&invalid.join("\n"));
+            }
+
+            Ok(response)
+        }
     }
+}
+
+async fn create_group(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    contacts: Vec<Contact>,
+    invalid: Vec<String>,
+) -> anyhow::Result<String> {
+    let mut group_num = 0;
+    loop {
+        let group_name = format!("group{}", group_num);
+        let existing = query!(
+            "SELECT id FROM groups WHERE creator_number = ? AND name = ?",
+            from,
+            group_name
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        if existing.is_none() {
+            break;
+        }
+        group_num += 1;
+    }
+
+    let group_name = format!("group{}", group_num);
+
+    let mut tx = pool.begin().await?;
+
+    query!(
+        "INSERT INTO groups (name, creator_number) VALUES (?, ?)",
+        group_name,
+        from
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let group_id = query!(
+        "SELECT id FROM groups WHERE creator_number = ? AND name = ?",
+        from,
+        group_name
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .id;
+
+    for contact in &contacts {
+        query!(
+            "INSERT INTO group_members (group_id, member_number) VALUES (?, ?)",
+            group_id,
+            contact.contact_user_number
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
 
-    // Clear the processed deletions from pending map
     {
         let mut pending = PENDING_DELETIONS.lock().unwrap();
         for contact in &contacts {
@@ -508,11 +690,10 @@ async fn handle_confirm(
         }
     }
 
-    // Format response
     let mut response = format!(
-        "Deleted {} contact{}:\n",
-        contacts.len(),
-        if contacts.len() == 1 { "" } else { "s" }
+        "Created group \"{}\" with {} members:\n",
+        group_name,
+        contacts.len()
     );
 
     for contact in contacts {
@@ -825,9 +1006,15 @@ impl ImportStats {
     }
 }
 
+enum ConfirmationIntent {
+    Delete,
+    AddToGroup,
+}
+
 struct PendingDeletion {
     contact_id: i64,
     timestamp: Instant,
+    intent: ConfirmationIntent,
 }
 
 static PENDING_DELETIONS: Lazy<Mutex<HashMap<String, PendingDeletion>>> =
