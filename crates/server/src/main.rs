@@ -324,7 +324,7 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
 
     for (i, contact) in contacts.iter().enumerate() {
         let token = format!("{}:{}", from, i + 1);
-        PENDING_DELETIONS.lock().unwrap().insert(
+        PENDING_ACTIONS.lock().unwrap().insert(
             token,
             PendingAction {
                 contact_id: contact.id,
@@ -493,7 +493,7 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
 
     for (i, contact) in contacts.iter().enumerate() {
         let token = format!("{}:{}", from, i + 1);
-        PENDING_DELETIONS.lock().unwrap().insert(
+        PENDING_ACTIONS.lock().unwrap().insert(
             token,
             PendingAction {
                 contact_id: contact.id,
@@ -520,7 +520,7 @@ async fn handle_confirm(
 
     // First, collect all the necessary information while holding the lock
     let (contact_ids, intent, invalid) = {
-        let pending = PENDING_DELETIONS.lock().unwrap();
+        let pending = PENDING_ACTIONS.lock().unwrap();
         let mut selected_items = Vec::new();
         let mut invalid = Vec::new();
         let mut intent = None;
@@ -594,7 +594,7 @@ async fn handle_confirm(
             tx.commit().await?;
 
             {
-                let mut pending = PENDING_DELETIONS.lock().unwrap();
+                let mut pending = PENDING_ACTIONS.lock().unwrap();
                 for contact in &contacts {
                     pending.retain(|_, deletion| deletion.contact_id != contact.id);
                 }
@@ -680,7 +680,7 @@ async fn create_group(
     tx.commit().await?;
 
     {
-        let mut pending = PENDING_DELETIONS.lock().unwrap();
+        let mut pending = PENDING_ACTIONS.lock().unwrap();
         for contact in &contacts {
             pending.retain(|_, deletion| deletion.contact_id != contact.id);
         }
@@ -708,7 +708,7 @@ async fn create_group(
 }
 
 fn cleanup_pending_deletions() {
-    PENDING_DELETIONS
+    PENDING_ACTIONS
         .lock()
         .unwrap()
         .retain(|_, deletion| deletion.timestamp.elapsed() <= DELETION_TIMEOUT);
@@ -780,7 +780,7 @@ struct PendingAction {
     intent: ConfirmationIntent,
 }
 
-static PENDING_DELETIONS: Lazy<Mutex<HashMap<String, PendingAction>>> =
+static PENDING_ACTIONS: Lazy<Mutex<HashMap<String, PendingAction>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const DELETION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
