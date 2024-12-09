@@ -1,3 +1,5 @@
+use contacts::process_vcard;
+
 use super::*;
 
 async fn setup_db(pool: &Pool<Sqlite>) -> Result<()> {
