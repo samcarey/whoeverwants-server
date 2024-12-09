@@ -136,8 +136,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 Err(e) => stats.add_error(&e.to_string()),
             }
         }
-
-        return Ok(stats.format_report(&from));
+        return Ok(stats.format_report(pool, &from).await?);
     }
 
     let mut words = body.trim().split_ascii_whitespace();
@@ -269,23 +268,17 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 }
 
 async fn handle_pick(pool: &Pool<Sqlite>, from: &str, selections: &str) -> anyhow::Result<String> {
-    // Get the deferred contacts while holding the lock
-    let deferred_contacts = {
-        let mut deferred_map = DEFERRED_CONTACTS.lock().unwrap();
+    // First check if there are any deferred contacts
+    let deferred_contacts = query!(
+        "SELECT DISTINCT contact_name FROM deferred_contacts WHERE submitter_number = ?",
+        from
+    )
+    .fetch_all(pool)
+    .await?;
 
-        // Clean up expired contacts while we have the lock
-        deferred_map.retain(|_, contacts| {
-            contacts.retain(|c| c.timestamp.elapsed() <= DEFERRED_TIMEOUT);
-            !contacts.is_empty()
-        });
-
-        // Clone the contacts we need so we can release the lock
-        deferred_map.get(from).map(|contacts| contacts.clone())
-    };
-
-    let Some(deferred_contacts) = deferred_contacts else {
+    if deferred_contacts.is_empty() {
         return Ok("No pending contacts to pick from.".to_string());
-    };
+    }
 
     let mut successful = Vec::new();
     let mut failed = Vec::new();
@@ -315,44 +308,53 @@ async fn handle_pick(pool: &Pool<Sqlite>, from: &str, selections: &str) -> anyho
             }
         };
 
-        // Get the contact and number
-        let contact = match deferred_contacts.get(contact_idx) {
-            Some(c) => c,
-            None => {
-                failed.push(format!("Contact number {} not found", contact_idx + 1));
-                continue;
-            }
+        // Get the contact name and number
+        let Some(contact_name) = deferred_contacts.get(contact_idx).map(|c| &c.contact_name) else {
+            failed.push(format!("Contact number {} not found", contact_idx + 1));
+            continue;
         };
 
-        let (number, _) = match contact.numbers.get(letter_idx) {
-            Some(n) => n,
-            None => {
-                failed.push(format!(
-                    "Number {} not found for contact {}",
-                    letter,
-                    contact_idx + 1
-                ));
-                continue;
-            }
+        // Get all numbers for this contact
+        let numbers = query!(
+            "SELECT phone_number, phone_description FROM deferred_contacts 
+             WHERE submitter_number = ? AND contact_name = ?
+             ORDER BY id",
+            from,
+            contact_name
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let Some(number) = numbers.get(letter_idx) else {
+            failed.push(format!(
+                "Number {} not found for contact {}",
+                letter,
+                contact_idx + 1
+            ));
+            continue;
         };
 
         // Insert the contact
-        if let Err(e) = add_contact(pool, from, &contact.name, number).await {
+        if let Err(e) = add_contact(pool, from, contact_name, &number.phone_number).await {
             failed.push(format!(
                 "Failed to add {} ({}): {}",
-                contact.name, number, e
+                contact_name, number.phone_number, e
             ));
         } else {
-            successful.push(format!("{} ({})", contact.name, number));
+            successful.push(format!("{} ({})", contact_name, number.phone_number));
         }
     }
 
-    // Remove processed contacts after we're done
-    {
-        if let Ok(mut deferred_map) = DEFERRED_CONTACTS.lock() {
-            if let Some(contacts) = deferred_map.get_mut(from) {
-                contacts.retain(|_| false);
-            }
+    // Clean up processed contacts
+    for contact in &successful {
+        if let Some(name) = contact.split(" (").next() {
+            query!(
+                "DELETE FROM deferred_contacts WHERE submitter_number = ? AND contact_name = ?",
+                from,
+                name
+            )
+            .execute(pool)
+            .await?;
         }
     }
 
@@ -580,7 +582,6 @@ enum ImportResult {
     Unchanged,
     Deferred,
 }
-
 async fn process_vcard(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -654,53 +655,38 @@ async fn process_vcard(
     }
 
     if numbers.len() > 1 {
-        // Store for later confirmation
-        let deferred = DeferredContact {
-            name: name.to_string(),
-            numbers: numbers,
-            timestamp: Instant::now(),
-        };
-
-        let mut deferred_contacts = DEFERRED_CONTACTS.lock().unwrap();
-        deferred_contacts
-            .entry(from.to_string())
-            .or_default()
-            .push(deferred);
-
-        Ok(ImportResult::Deferred)
-    } else {
-        // Single number case - proceed with insertion
-        let (number, _) = numbers.into_iter().next().unwrap();
-
+        // Store numbers in deferred_contacts table
         let mut tx = pool.begin().await?;
 
-        // Create user if needed
-        let contact_user = query!("SELECT * FROM users WHERE number = ?", number)
-            .fetch_optional(&mut *tx)
-            .await?;
+        // First clear any existing deferred contacts for this submitter and contact name
+        query!(
+            "DELETE FROM deferred_contacts WHERE submitter_number = ? AND contact_name = ?",
+            from,
+            name
+        )
+        .execute(&mut *tx)
+        .await?;
 
-        if contact_user.is_none() {
+        // Insert all numbers as deferred contacts
+        for (number, description) in numbers {
             query!(
-                "INSERT INTO users (number, name) VALUES (?, ?)",
+                "INSERT INTO deferred_contacts (submitter_number, contact_name, phone_number, phone_description) 
+                 VALUES (?, ?, ?, ?)",
+                from,
+                name,
                 number,
-                name
+                description
             )
             .execute(&mut *tx)
             .await?;
         }
 
-        // Insert contact
-        query!(
-            "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
-             VALUES (?, ?, ?)",
-            from,
-            name,
-            number
-        )
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
+        Ok(ImportResult::Deferred)
+    } else {
+        // Single number case - proceed with insertion
+        let (number, _) = numbers.into_iter().next().unwrap();
+        add_contact(pool, from, name, &number).await?;
         Ok(ImportResult::Added)
     }
 }
@@ -759,18 +745,6 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
     trace!("Message sent with SID {}", message.sid.unwrap().unwrap());
     Ok(())
 }
-// Add these new types to the top of main.rs
-#[derive(Debug, Clone)]
-struct DeferredContact {
-    name: String,
-    numbers: Vec<(String, Option<String>)>, // (number, description) pairs
-    timestamp: Instant,
-}
-
-static DEFERRED_CONTACTS: Lazy<Mutex<HashMap<String, Vec<DeferredContact>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-const DEFERRED_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
 
 // Update ImportStats to include deferred count
 #[derive(Default)]
@@ -789,7 +763,7 @@ impl ImportStats {
         self.failed += 1;
     }
 
-    fn format_report(&self, from: &str) -> String {
+    async fn format_report(&self, pool: &Pool<Sqlite>, from: &str) -> Result<String> {
         let mut report = format!(
             "Processed contacts: {} added, {} updated, {} unchanged, {} deferred, {} failed",
             self.added, self.updated, self.skipped, self.deferred, self.failed
@@ -803,27 +777,51 @@ impl ImportStats {
         }
 
         if self.deferred > 0 {
-            // Add list of deferred contacts
-            if let Ok(deferred_map) = DEFERRED_CONTACTS.lock() {
-                if let Some(deferred) = deferred_map.get(from) {
-                    report.push_str(
-                        "\n\nThe following contacts have multiple numbers. \
-                        Reply with \"pick NA, MB, ...\" \
-                        where N and M are from the list of contacts below \
-                        and A and B are the letters for the desired phone numbers for each.\n",
-                    );
-                    for (i, contact) in deferred.iter().enumerate() {
-                        report.push_str(&format!("\n{}. {}", i + 1, contact.name));
-                        for (j, (number, description)) in contact.numbers.iter().enumerate() {
-                            let letter = (b'a' + j as u8) as char;
-                            let desc = description.as_deref().unwrap_or("no description");
-                            report.push_str(&format!("\n   {}. {} ({})", letter, number, desc));
-                        }
+            // Get all unique contact names for this submitter
+            let contacts = query!(
+                "SELECT DISTINCT contact_name FROM deferred_contacts WHERE submitter_number = ? ORDER BY contact_name",
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+
+            if !contacts.is_empty() {
+                report.push_str(
+                    "\n\nThe following contacts have multiple numbers. \
+                    Reply with \"pick NA, MB, ...\" \
+                    where N and M are from the list of contacts below \
+                    and A and B are the letters for the desired phone numbers for each.\n",
+                );
+
+                for (i, contact) in contacts.iter().enumerate() {
+                    report.push_str(&format!("\n{}. {}", i + 1, contact.contact_name));
+
+                    // Get all numbers for this contact
+                    let numbers = query!(
+                        "SELECT phone_number, phone_description FROM deferred_contacts 
+                         WHERE submitter_number = ? AND contact_name = ? 
+                         ORDER BY id",
+                        from,
+                        contact.contact_name
+                    )
+                    .fetch_all(pool)
+                    .await?;
+
+                    for (j, number) in numbers.iter().enumerate() {
+                        let letter = (b'a' + j as u8) as char;
+                        let desc = number
+                            .phone_description
+                            .as_deref()
+                            .unwrap_or("no description");
+                        report.push_str(&format!(
+                            "\n   {}. {} ({})",
+                            letter, number.phone_number, desc
+                        ));
                     }
                 }
             }
         }
-        report
+        Ok(report)
     }
 }
 
