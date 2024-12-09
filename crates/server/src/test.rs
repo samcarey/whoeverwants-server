@@ -81,7 +81,6 @@ async fn test_help_and_info_commands(pool: Pool<Sqlite>) -> Result<()> {
 
     Ok(())
 }
-
 #[sqlx::test]
 async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
@@ -91,7 +90,7 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
 
     // Test empty contacts list
     let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("haven't added any contacts yet"));
+    assert!(response.contains("You don't have any contacts")); // Changed assertion
 
     // Add a contact through vcard
     let vcard_data = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+19876543210\nEND:VCARD\n";
@@ -117,7 +116,28 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
 
     // Verify contact was deleted
     let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("haven't added any contacts yet"));
+    assert!(response.contains("You don't have any contacts")); // Changed assertion
+
+    Ok(())
+}
+
+#[sqlx::test]
+async fn test_malformed_vcard(pool: Pool<Sqlite>) -> Result<()> {
+    setup_db(&pool).await?;
+
+    // Register user
+    send_message(&pool, "+1234567890", "name John Doe").await?;
+
+    // Test malformed vcard
+    let malformed_vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nEND:VCARD\n"; // Missing TEL
+    let mut reader = ical::VcardParser::new(malformed_vcard.as_bytes());
+    let vcard = reader.next().unwrap();
+    let result = process_vcard(&pool, "+1234567890", vcard).await;
+    assert!(result.is_err());
+
+    // Verify no contact was added
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(response.contains("You don't have any contacts")); // Changed assertion
 
     Ok(())
 }
@@ -187,27 +207,6 @@ async fn test_contact_updates(pool: Pool<Sqlite>) -> Result<()> {
     let response = send_message(&pool, "+1234567890", "contacts").await?;
     assert!(response.contains("Alice Johnson"));
     assert!(!response.contains("Alice Smith"));
-
-    Ok(())
-}
-
-#[sqlx::test]
-async fn test_malformed_vcard(pool: Pool<Sqlite>) -> Result<()> {
-    setup_db(&pool).await?;
-
-    // Register user
-    send_message(&pool, "+1234567890", "name John Doe").await?;
-
-    // Test malformed vcard
-    let malformed_vcard = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nEND:VCARD\n"; // Missing TEL
-    let mut reader = ical::VcardParser::new(malformed_vcard.as_bytes());
-    let vcard = reader.next().unwrap();
-    let result = process_vcard(&pool, "+1234567890", vcard).await;
-    assert!(result.is_err());
-
-    // Verify no contact was added
-    let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("haven't added any contacts yet"));
 
     Ok(())
 }

@@ -632,16 +632,13 @@ async fn process_vcard(
     .fetch_all(pool)
     .await?;
 
-    let mut new_numbers = Vec::new();
-    let mut updated = false;
-
-    for (num, desc) in numbers {
+    // If any number matches an existing contact, update that contact's name and return
+    for (num, _) in &numbers {
         if let Some(existing) = existing_contacts
             .iter()
-            .find(|contact| contact.contact_user_number == num)
+            .find(|contact| &contact.contact_user_number == num)
         {
             if existing.contact_name != *name {
-                // Update the contact's name if it changed
                 query!(
                     "UPDATE contacts SET contact_name = ? WHERE submitter_number = ? AND contact_user_number = ?",
                     name,
@@ -650,26 +647,17 @@ async fn process_vcard(
                 )
                 .execute(pool)
                 .await?;
-                updated = true;
+                return Ok(ImportResult::Updated);
             }
-        } else {
-            new_numbers.push((num, desc));
+            return Ok(ImportResult::Unchanged);
         }
     }
 
-    if new_numbers.is_empty() {
-        return Ok(if updated {
-            ImportResult::Updated
-        } else {
-            ImportResult::Unchanged
-        });
-    }
-
-    if new_numbers.len() > 1 {
+    if numbers.len() > 1 {
         // Store for later confirmation
         let deferred = DeferredContact {
             name: name.to_string(),
-            numbers: new_numbers,
+            numbers: numbers,
             timestamp: Instant::now(),
         };
 
@@ -682,7 +670,7 @@ async fn process_vcard(
         Ok(ImportResult::Deferred)
     } else {
         // Single number case - proceed with insertion
-        let (number, _) = new_numbers.into_iter().next().unwrap();
+        let (number, _) = numbers.into_iter().next().unwrap();
 
         let mut tx = pool.begin().await?;
 
