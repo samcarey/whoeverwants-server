@@ -1,8 +1,4 @@
-# Decision Bot
-
-It decides so you don't have to.
-
-# Usage
+# Whoever Wants
 
 ## Dev
 
