@@ -29,7 +29,6 @@ pub async fn process_contact_submission(
     }
     stats.format_report(pool, &from).await
 }
-
 pub async fn process_vcard(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -111,6 +110,14 @@ pub async fn process_vcard(
             "DELETE FROM deferred_contacts WHERE submitter_number = ? AND contact_name = ?",
             from,
             name
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Set the pending action type to deferred_contacts
+        query!(
+            "INSERT OR REPLACE INTO pending_actions (submitter_number, action_type) VALUES (?, 'deferred_contacts')",
+            from
         )
         .execute(&mut *tx)
         .await?;
@@ -214,7 +221,7 @@ impl ImportStats {
             if !contacts.is_empty() {
                 report.push_str(
                     "\n\nThe following contacts have multiple numbers. \
-                    Reply with \"pick NA, MB, ...\" \
+                    Reply with \"confirm NA, MB, ...\" \
                     where N and M are from the list of contacts below \
                     and A and B are the letters for the desired phone numbers for each.\n",
                 );

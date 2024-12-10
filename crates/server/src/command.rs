@@ -14,7 +14,6 @@ pub(crate) enum Command {
     contacts,
     delete,
     confirm,
-    pick,
     group,
 }
 
@@ -45,7 +44,6 @@ impl Command {
             Self::contacts => "see a list of your stored contacts",
             Self::delete => "delete a contact by name",
             Self::confirm => "confirm pending action(s)",
-            Self::pick => "select which number to use for contacts with multiple numbers",
             Self::group => "create a new group from your contacts",
         }
         .to_string()
@@ -72,11 +70,6 @@ impl Command {
             }),
             Self::stop => None,
             Self::contacts => None,
-            Self::pick => Some(ParameterDoc {
-                example: "1a, 2b".to_string(),
-                description: "number and letter pairs from the list of pending contacts"
-                    .to_string(),
-            }),
             Self::group => Some(ParameterDoc {
                 example: "John, Alice".to_string(),
                 description: "comma-separated list of contact name fragments".to_string(),

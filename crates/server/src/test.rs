@@ -239,3 +239,102 @@ async fn test_add_contacts_before_registration(pool: Pool<Sqlite>) -> Result<()>
 
     Ok(())
 }
+
+#[sqlx::test]
+async fn test_multi_number_contact_selection(pool: Pool<Sqlite>) -> Result<()> {
+    setup_db(&pool).await?;
+
+    // Register user first
+    send_message(&pool, "+1234567890", "name John Doe").await?;
+
+    // Add a contact with multiple numbers through vcard
+    let vcard_data = "BEGIN:VCARD\n\
+        VERSION:3.0\n\
+        FN:Alice Smith\n\
+        TEL;TYPE=CELL:+19876543210\n\
+        TEL;TYPE=WORK:+19876543211\n\
+        TEL;TYPE=HOME:+19876543212\n\
+        END:VCARD\n";
+
+    let mut reader = ical::VcardParser::new(vcard_data.as_bytes());
+    let vcard = reader.next().unwrap();
+    let result = process_vcard(&pool, "+1234567890", vcard).await?;
+    assert!(matches!(result, ImportResult::Deferred));
+
+    // Add another contact with multiple numbers
+    let vcard_data_2 = "BEGIN:VCARD\n\
+        VERSION:3.0\n\
+        FN:Bob Jones\n\
+        TEL;TYPE=CELL:+19876543220\n\
+        TEL;TYPE=WORK:+19876543221\n\
+        END:VCARD\n";
+
+    let mut reader = ical::VcardParser::new(vcard_data_2.as_bytes());
+    let vcard = reader.next().unwrap();
+    let result = process_vcard(&pool, "+1234567890", vcard).await?;
+    assert!(matches!(result, ImportResult::Deferred));
+
+    // Check response shows pending contacts with multiple numbers
+    let response = send_message(&pool, "+1234567890", "h").await?;
+    assert!(response.contains("Alice Smith"));
+    assert!(response.contains("Bob Jones"));
+    assert!(response.contains("+19876543210")); // Alice's cell
+    assert!(response.contains("+19876543220")); // Bob's cell
+    assert!(response.contains("CELL"));
+    assert!(response.contains("WORK"));
+
+    // Select numbers for both contacts (Alice's WORK and Bob's CELL)
+    let response = send_message(&pool, "+1234567890", "confirm 1b, 2a").await?;
+    assert!(response.contains("Successfully added 2 contacts"));
+    assert!(response.contains("Alice Smith (+19876543211)")); // Work number
+    assert!(response.contains("Bob Jones (+19876543220)")); // Cell number
+
+    // Verify contacts list shows the selected numbers
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(response.contains("Alice Smith"));
+    assert!(response.contains("Bob Jones"));
+    assert!(response.contains("987")); // Area code checks
+
+    // Verify deferred contacts were cleaned up
+    let deferred_count = query!(
+        "SELECT COUNT(*) as count FROM deferred_contacts WHERE submitter_number = ?",
+        "+1234567890"
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(deferred_count.count, 0);
+
+    // Verify pending action was cleaned up
+    let pending_count = query!(
+        "SELECT COUNT(*) as count FROM pending_actions WHERE submitter_number = ?",
+        "+1234567890"
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_count.count, 0);
+
+    // Try invalid selections
+    let vcard_data_3 = "BEGIN:VCARD\n\
+        VERSION:3.0\n\
+        FN:Charlie Brown\n\
+        TEL;TYPE=CELL:+19876543230\n\
+        TEL;TYPE=WORK:+19876543231\n\
+        END:VCARD\n";
+
+    let mut reader = ical::VcardParser::new(vcard_data_3.as_bytes());
+    let vcard = reader.next().unwrap();
+    let result = process_vcard(&pool, "+1234567890", vcard).await?;
+    assert!(matches!(result, ImportResult::Deferred));
+
+    // Test various invalid selections
+    let response = send_message(&pool, "+1234567890", "confirm 1c").await?; // Invalid letter
+    assert!(response.contains("Invalid letter selection: c"));
+
+    let response = send_message(&pool, "+1234567890", "confirm 2a").await?; // Invalid contact number
+    assert!(response.contains("Contact number 2 not found"));
+
+    let response = send_message(&pool, "+1234567890", "confirm abc").await?; // Invalid format
+    assert!(response.contains("Invalid selection format: abc"));
+
+    Ok(())
+}
