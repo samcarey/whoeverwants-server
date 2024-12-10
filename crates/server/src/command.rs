@@ -41,7 +41,7 @@ impl Command {
             Self::info => "see information about a command",
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
-            Self::contacts => "see a list of your stored contacts",
+            Self::contacts => "see a list of your groups and contacts",
             Self::delete => "delete a contact by name",
             Self::confirm => "confirm pending action(s)",
             Self::group => "create a new group from your contacts",
