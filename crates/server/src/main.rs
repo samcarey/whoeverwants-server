@@ -9,16 +9,13 @@ use contacts::{add_contact, process_contact_submission};
 use dotenv::dotenv;
 use enum_iterator::all;
 use log::*;
-use once_cell::sync::Lazy;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
 };
 use sqlx::{query, query_as, Pool, Sqlite};
 use std::env;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use std::{collections::HashMap, str::FromStr};
+use std::str::FromStr;
 use util::E164;
 
 mod command;
@@ -162,16 +159,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 
     let response = match command {
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
-        Command::h => {
-            let available_commands = format!(
-                "Available commands:\n{}\n",
-                all::<Command>()
-                    .map(|c| format!("- {c}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            format!("{available_commands}\n{}", Command::info.hint())
-        }
+        Command::h => handle_help(pool, &from).await?,
         Command::name => match process_name(words) {
             Ok(name) => {
                 query!("update users set name = ? where number = ?", name, from)
@@ -271,9 +259,26 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     Ok(response)
 }
 
-async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::Result<String> {
-    cleanup_pending_deletions();
+async fn handle_help(pool: &Pool<Sqlite>, from: &str) -> Result<String> {
+    cleanup_expired_pending_actions(pool).await?;
 
+    let mut response = format!(
+        "Available commands:\n{}\n",
+        all::<Command>()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    response.push_str(&format!("\n{}", Command::info.hint()));
+
+    if let Some(pending_prompt) = get_pending_action_prompt(pool, from).await? {
+        response.push_str(&pending_prompt);
+    }
+
+    Ok(response)
+}
+
+async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::Result<String> {
     let name_fragments: Vec<_> = names.split(',').map(str::trim).collect();
 
     if name_fragments.is_empty() {
@@ -309,6 +314,25 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
         ));
     }
 
+    let mut tx = pool.begin().await?;
+
+    // Set pending action type to group
+    set_pending_action(pool, from, "group", &mut tx).await?;
+
+    // Store contacts for group creation
+    for contact in &contacts {
+        query!(
+            "INSERT INTO pending_group_members (pending_action_submitter, contact_id) 
+             VALUES (?, ?)",
+            from,
+            contact.id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
     let list = contacts
         .iter()
         .enumerate()
@@ -321,18 +345,6 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
         })
         .collect::<Vec<_>>()
         .join("\n");
-
-    for (i, contact) in contacts.iter().enumerate() {
-        let token = format!("{}:{}", from, i + 1);
-        PENDING_ACTIONS.lock().unwrap().insert(
-            token,
-            PendingAction {
-                contact_id: contact.id,
-                timestamp: Instant::now(),
-                intent: ConfirmationIntent::AddToGroup,
-            },
-        );
-    }
 
     Ok(format!(
         "Found these contacts:\n{}\n\nTo create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"",
@@ -456,10 +468,7 @@ async fn handle_pick(pool: &Pool<Sqlite>, from: &str, selections: &str) -> anyho
 
     Ok(response)
 }
-
 async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
-    cleanup_pending_deletions();
-
     let like = format!("%{}%", name.to_lowercase());
     let contacts = query_as!(
         Contact,
@@ -478,6 +487,25 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         return Ok(format!("No contacts found matching \"{}\"", name));
     }
 
+    let mut tx = pool.begin().await?;
+
+    // Set pending action type to deletion
+    set_pending_action(pool, from, "deletion", &mut tx).await?;
+
+    // Store contacts for deletion
+    for contact in &contacts {
+        query!(
+            "INSERT INTO pending_deletions (pending_action_submitter, contact_id) 
+             VALUES (?, ?)",
+            from,
+            contact.id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
     let list = contacts
         .iter()
         .enumerate()
@@ -491,18 +519,6 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         .collect::<Vec<_>>()
         .join("\n");
 
-    for (i, contact) in contacts.iter().enumerate() {
-        let token = format!("{}:{}", from, i + 1);
-        PENDING_ACTIONS.lock().unwrap().insert(
-            token,
-            PendingAction {
-                contact_id: contact.id,
-                timestamp: Instant::now(),
-                intent: ConfirmationIntent::Delete,
-            },
-        );
-    }
-
     Ok(format!(
         "Found these contacts matching \"{}\":\n{}\n\n\
         To delete contacts, reply \"confirm NUM1, NUM2, ...\", \
@@ -510,103 +526,119 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
         name, list
     ))
 }
-
 async fn handle_confirm(
     pool: &Pool<Sqlite>,
     from: &str,
     selections: &str,
 ) -> anyhow::Result<String> {
-    cleanup_pending_deletions();
+    let pending_action = query!(
+        "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
+        from
+    )
+    .fetch_optional(pool)
+    .await?;
 
-    // First, collect all the necessary information while holding the lock
-    let (contact_ids, intent, invalid) = {
-        let pending = PENDING_ACTIONS.lock().unwrap();
-        let mut selected_items = Vec::new();
-        let mut invalid = Vec::new();
-        let mut intent = None;
-
-        // Process all selections and collect the data
-        for num_str in selections.split(',').map(str::trim) {
-            match num_str.parse::<usize>() {
-                Ok(num) if num > 0 => {
-                    let token = format!("{}:{}", from, num);
-                    if let Some(deletion) = pending.get(&token) {
-                        selected_items.push(deletion.contact_id);
-                        if intent.is_none() {
-                            intent = Some(match deletion.intent {
-                                ConfirmationIntent::Delete => ConfirmationIntent::Delete,
-                                ConfirmationIntent::AddToGroup => ConfirmationIntent::AddToGroup,
-                            });
-                        } else if !matches!(
-                            (&deletion.intent, intent.as_ref().unwrap()),
-                            (ConfirmationIntent::Delete, ConfirmationIntent::Delete)
-                                | (
-                                    ConfirmationIntent::AddToGroup,
-                                    ConfirmationIntent::AddToGroup
-                                )
-                        ) {
-                            invalid.push(
-                                "Cannot mix deletion and group creation selections".to_string(),
-                            );
-                        }
-                    } else {
-                        invalid.push(format!("Invalid selection: {}", num));
-                    }
-                }
-                _ => invalid.push(format!("Invalid number: {}", num_str)),
-            }
-        }
-
-        if selected_items.is_empty() && invalid.is_empty() {
-            return Ok("No valid selections provided.".to_string());
-        }
-
-        (
-            selected_items,
-            intent.unwrap_or(ConfirmationIntent::Delete),
-            invalid,
-        )
+    let Some(action) = pending_action else {
+        return Ok("No pending actions to confirm.".to_string());
     };
 
-    let mut contacts = Vec::new();
-    for id in &contact_ids {
-        if let Some(contact) = query_as!(
-            Contact,
-            "SELECT id as \"id!\", contact_name, contact_user_number FROM contacts WHERE id = ?",
-            id
-        )
-        .fetch_optional(pool)
-        .await?
-        {
-            contacts.push(contact);
+    let action_type = action.action_type;
+
+    let mut invalid = Vec::new();
+    let mut selected_contacts = Vec::new();
+
+    // Process all selections and collect the data
+    for num_str in selections.split(',').map(str::trim) {
+        match num_str.parse::<usize>() {
+            Ok(num) if num > 0 => {
+                let offset = (num - 1) as i64;
+                match action_type.as_str() {
+                    "deletion" => {
+                        // Get the nth contact marked for deletion
+                        let query = query!(
+                            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
+                             FROM contacts c
+                             JOIN pending_deletions pd ON pd.contact_id = c.id
+                             WHERE pd.pending_action_submitter = ?
+                             ORDER BY c.contact_name
+                             LIMIT 1 OFFSET ?",
+                            from,
+                            offset
+                        );
+                        if let Some(row) = query.fetch_optional(pool).await? {
+                            selected_contacts.push(Contact {
+                                id: row.id,
+                                contact_name: row.contact_name,
+                                contact_user_number: row.contact_user_number,
+                            });
+                        } else {
+                            invalid.push(format!("Invalid selection: {}", num));
+                        }
+                    }
+                    "group" => {
+                        // Get the nth contact marked for group creation
+                        let query = query!(
+                            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
+                             FROM contacts c
+                             JOIN pending_group_members pgm ON pgm.contact_id = c.id
+                             WHERE pgm.pending_action_submitter = ?
+                             ORDER BY c.contact_name
+                             LIMIT 1 OFFSET ?",
+                            from,
+                            offset
+                        );
+                        if let Some(row) = query.fetch_optional(pool).await? {
+                            selected_contacts.push(Contact {
+                                id: row.id,
+                                contact_name: row.contact_name,
+                                contact_user_number: row.contact_user_number,
+                            });
+                        } else {
+                            invalid.push(format!("Invalid selection: {}", num));
+                        }
+                    }
+                    _ => invalid.push(format!("Unsupported action type: {}", action_type)),
+                }
+            }
+            _ => invalid.push(format!("Invalid number: {}", num_str)),
         }
     }
 
-    match intent {
-        ConfirmationIntent::AddToGroup => create_group(pool, from, contacts, invalid).await,
-        ConfirmationIntent::Delete => {
+    if selected_contacts.is_empty() && invalid.is_empty() {
+        return Ok("No valid selections provided.".to_string());
+    }
+
+    match action_type.as_str() {
+        "deletion" => {
             let mut tx = pool.begin().await?;
-            for id in contact_ids {
-                query!("DELETE FROM contacts WHERE id = ?", id)
+
+            for contact in &selected_contacts {
+                query!("DELETE FROM contacts WHERE id = ?", contact.id)
                     .execute(&mut *tx)
                     .await?;
             }
-            tx.commit().await?;
 
-            {
-                let mut pending = PENDING_ACTIONS.lock().unwrap();
-                for contact in &contacts {
-                    pending.retain(|_, deletion| deletion.contact_id != contact.id);
-                }
-            }
+            // Clean up pending actions
+            query!(
+                "DELETE FROM pending_actions WHERE submitter_number = ?",
+                from
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
 
             let mut response = format!(
                 "Deleted {} contact{}:\n",
-                contacts.len(),
-                if contacts.len() == 1 { "" } else { "s" }
+                selected_contacts.len(),
+                if selected_contacts.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             );
 
-            for contact in contacts {
+            for contact in selected_contacts {
                 let area_code = E164::from_str(&contact.contact_user_number)
                     .map(|e| e.area_code().to_string())
                     .unwrap_or_else(|_| "???".to_string());
@@ -620,6 +652,8 @@ async fn handle_confirm(
 
             Ok(response)
         }
+        "group" => create_group(pool, from, selected_contacts, invalid).await,
+        _ => Ok("Invalid action type".to_string()),
     }
 }
 
@@ -677,14 +711,15 @@ async fn create_group(
         .await?;
     }
 
-    tx.commit().await?;
+    // Clean up pending actions
+    query!(
+        "DELETE FROM pending_actions WHERE submitter_number = ?",
+        from
+    )
+    .execute(&mut *tx)
+    .await?;
 
-    {
-        let mut pending = PENDING_ACTIONS.lock().unwrap();
-        for contact in &contacts {
-            pending.retain(|_, deletion| deletion.contact_id != contact.id);
-        }
-    }
+    tx.commit().await?;
 
     let mut response = format!(
         "Created group \"{}\" with {} members:\n",
@@ -705,13 +740,6 @@ async fn create_group(
     }
 
     Ok(response)
-}
-
-fn cleanup_pending_deletions() {
-    PENDING_ACTIONS
-        .lock()
-        .unwrap()
-        .retain(|_, deletion| deletion.timestamp.elapsed() <= DELETION_TIMEOUT);
 }
 
 async fn onboard_new_user(
@@ -769,18 +797,169 @@ async fn send(twilio_config: &Configuration, to: String, message: String) -> Res
     Ok(())
 }
 
-enum ConfirmationIntent {
-    Delete,
-    AddToGroup,
+async fn cleanup_expired_pending_actions(pool: &Pool<Sqlite>) -> Result<()> {
+    query!("DELETE FROM pending_actions WHERE created_at < unixepoch() - 300")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
-struct PendingAction {
-    contact_id: i64,
-    timestamp: Instant,
-    intent: ConfirmationIntent,
+async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Option<String>> {
+    let pending = query!(
+        "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
+        from
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    match pending {
+        Some(row) => {
+            let prompt = match row.action_type.as_str() {
+                "deletion" => {
+                    let contacts = query!(
+                        "SELECT c.contact_name, c.contact_user_number 
+                         FROM pending_deletions pd
+                         JOIN contacts c ON c.id = pd.contact_id 
+                         WHERE pd.pending_action_submitter = ?
+                         ORDER BY c.contact_name",
+                        from
+                    )
+                    .fetch_all(pool)
+                    .await?;
+
+                    if contacts.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let list = contacts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            let area_code = E164::from_str(&c.contact_user_number)
+                                .map(|e| e.area_code().to_string())
+                                .unwrap_or_else(|_| "???".to_string());
+                            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    format!(
+                        "\n\nYou have pending contact deletions:\n{}\n\
+                        To delete contacts, reply \"confirm NUM1, NUM2, ...\"",
+                        list
+                    )
+                }
+                "deferred_contacts" => {
+                    let contacts = query!(
+                        "SELECT DISTINCT contact_name FROM deferred_contacts 
+                         WHERE submitter_number = ? 
+                         ORDER BY contact_name",
+                        from
+                    )
+                    .fetch_all(pool)
+                    .await?;
+
+                    if contacts.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let mut response =
+                        "\n\nYou have contacts with multiple numbers pending:\n".to_string();
+
+                    for (i, contact) in contacts.iter().enumerate() {
+                        response.push_str(&format!("\n{}. {}", i + 1, contact.contact_name));
+
+                        let numbers = query!(
+                            "SELECT phone_number, phone_description 
+                             FROM deferred_contacts 
+                             WHERE submitter_number = ? AND contact_name = ?
+                             ORDER BY id",
+                            from,
+                            contact.contact_name
+                        )
+                        .fetch_all(pool)
+                        .await?;
+
+                        for (j, number) in numbers.iter().enumerate() {
+                            let letter = (b'a' + j as u8) as char;
+                            let desc = number
+                                .phone_description
+                                .as_deref()
+                                .unwrap_or("no description");
+                            response.push_str(&format!(
+                                "\n   {}. {} ({})",
+                                letter, number.phone_number, desc
+                            ));
+                        }
+                    }
+
+                    response.push_str("\n\nReply with \"pick NA, MB, ...\" where N and M are contact numbers and A and B are letter choices");
+                    response
+                }
+                "group" => {
+                    let contacts = query!(
+                        "SELECT c.contact_name, c.contact_user_number 
+                         FROM pending_group_members pgm
+                         JOIN contacts c ON c.id = pgm.contact_id 
+                         WHERE pgm.pending_action_submitter = ?
+                         ORDER BY c.contact_name",
+                        from
+                    )
+                    .fetch_all(pool)
+                    .await?;
+
+                    if contacts.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let list = contacts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            let area_code = E164::from_str(&c.contact_user_number)
+                                .map(|e| e.area_code().to_string())
+                                .unwrap_or_else(|_| "???".to_string());
+                            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    format!(
+                        "\n\nYou have a pending group creation:\n{}\n\
+                        To create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"",
+                        list
+                    )
+                }
+                _ => return Ok(None),
+            };
+            Ok(Some(prompt))
+        }
+        None => Ok(None),
+    }
 }
 
-static PENDING_ACTIONS: Lazy<Mutex<HashMap<String, PendingAction>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+async fn set_pending_action(
+    _pool: &Pool<Sqlite>, // Changed to _pool since it's unused
+    from: &str,
+    action_type: &str,
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<()> {
+    // Clear any existing pending action
+    query!(
+        "DELETE FROM pending_actions WHERE submitter_number = ?",
+        from
+    )
+    .execute(&mut **tx)
+    .await?;
 
-const DELETION_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+    // Create new pending action
+    query!(
+        "INSERT INTO pending_actions (submitter_number, action_type) VALUES (?, ?)",
+        from,
+        action_type
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
