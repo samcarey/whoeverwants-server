@@ -255,8 +255,12 @@ async fn handle_help(pool: &Pool<Sqlite>, from: &str) -> Result<String> {
     cleanup_expired_pending_actions(pool).await?;
 
     let mut response = format!(
-        "Available commands:\n{}\n",
+        "General commands:\n{}\n",
         all::<Command>()
+            .filter(|c| match c {
+                Command::confirm => false,
+                _ => true,
+            })
             .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
             .join("\n")
