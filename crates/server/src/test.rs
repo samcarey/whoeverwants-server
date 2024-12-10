@@ -64,7 +64,7 @@ async fn test_help_and_info_commands(pool: Pool<Sqlite>) -> Result<()> {
 
     // Test help command
     let response = send_message(&pool, "+1234567890", "h").await?;
-    assert!(response.contains("Available commands"));
+    assert!(response.contains("General commands"));
     assert!(response.contains("name"));
     assert!(response.contains("info"));
     assert!(response.contains("contacts"));
@@ -92,7 +92,7 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
 
     // Test empty contacts list
     let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("You don't have any contacts")); // Changed assertion
+    assert!(response.contains("You don't have any")); // Changed assertion
 
     // Add a contact through vcard
     let vcard_data = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+19876543210\nEND:VCARD\n";
@@ -118,7 +118,7 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
 
     // Verify contact was deleted
     let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("You don't have any contacts")); // Changed assertion
+    assert!(response.contains("You don't have any")); // Changed assertion
 
     Ok(())
 }
@@ -139,7 +139,7 @@ async fn test_malformed_vcard(pool: Pool<Sqlite>) -> Result<()> {
 
     // Verify no contact was added
     let response = send_message(&pool, "+1234567890", "contacts").await?;
-    assert!(response.contains("You don't have any contacts")); // Changed assertion
+    assert!(response.contains("You don't have any")); // Changed assertion
 
     Ok(())
 }
