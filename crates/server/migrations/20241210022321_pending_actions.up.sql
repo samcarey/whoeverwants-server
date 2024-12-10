@@ -9,9 +9,21 @@ CREATE TABLE pending_actions (
 CREATE TABLE pending_deletions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pending_action_submitter TEXT NOT NULL,
-    contact_id INTEGER NOT NULL,
+    contact_id INTEGER,
+    group_id INTEGER,
     FOREIGN KEY(pending_action_submitter) REFERENCES pending_actions(submitter_number) ON DELETE CASCADE,
-    FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+    FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE,
+    FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    CHECK (
+        (
+            contact_id IS NULL
+            AND group_id IS NOT NULL
+        )
+        OR (
+            contact_id IS NOT NULL
+            AND group_id IS NULL
+        )
+    )
 );
 CREATE TABLE pending_group_members (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

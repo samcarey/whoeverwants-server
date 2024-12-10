@@ -338,3 +338,106 @@ async fn test_multi_number_contact_selection(pool: Pool<Sqlite>) -> Result<()> {
 
     Ok(())
 }
+
+#[sqlx::test]
+async fn test_group_deletion(pool: Pool<Sqlite>) -> Result<()> {
+    setup_db(&pool).await?;
+
+    // Register user
+    send_message(&pool, "+1234567890", "name John Doe").await?;
+
+    // First add some contacts to make groups with
+    let vcard1 = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:+19876543210\nEND:VCARD\n";
+    let vcard2 = "BEGIN:VCARD\nVERSION:3.0\nFN:Bob Wilson\nTEL:+19876543211\nEND:VCARD\n";
+    let vcard3 = "BEGIN:VCARD\nVERSION:3.0\nFN:Carol Brown\nTEL:+19876543212\nEND:VCARD\n";
+
+    // Add contacts
+    let mut reader = ical::VcardParser::new(vcard1.as_bytes());
+    process_vcard(&pool, "+1234567890", reader.next().unwrap()).await?;
+    let mut reader = ical::VcardParser::new(vcard2.as_bytes());
+    process_vcard(&pool, "+1234567890", reader.next().unwrap()).await?;
+    let mut reader = ical::VcardParser::new(vcard3.as_bytes());
+    process_vcard(&pool, "+1234567890", reader.next().unwrap()).await?;
+
+    // Create first group
+    let response = send_message(&pool, "+1234567890", "group Alice, Bob").await?;
+    assert!(response.contains("Found these contacts"));
+    let response = send_message(&pool, "+1234567890", "confirm 1,2").await?;
+    assert!(response.contains("Created group \"group0\""));
+
+    // Create second group
+    let response = send_message(&pool, "+1234567890", "group Bob, Carol").await?;
+    assert!(response.contains("Found these contacts"));
+    let response = send_message(&pool, "+1234567890", "confirm 1,2").await?;
+    assert!(response.contains("Created group \"group1\""));
+
+    // Verify groups were created with correct members
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(response.contains("group0 (2 members)"));
+    assert!(response.contains("group1 (2 members)"));
+
+    // Test deleting just the first group
+    let response = send_message(&pool, "+1234567890", "delete group0").await?;
+    assert!(response.contains("Found these groups:"));
+    assert!(response.contains("group0 (2 members)"));
+    let response = send_message(&pool, "+1234567890", "confirm 1").await?;
+    assert!(response.contains("Deleted 1 group"));
+    assert!(response.contains("group0 (2 members)"));
+
+    // Verify first group was deleted but second remains
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(!response.contains("group0"));
+    assert!(response.contains("group1 (2 members)"));
+
+    // Test deleting by partial name match
+    let response = send_message(&pool, "+1234567890", "delete group").await?;
+    assert!(response.contains("Found these groups:"));
+    assert!(response.contains("group1 (2 members)"));
+    let response = send_message(&pool, "+1234567890", "confirm 1").await?;
+    assert!(response.contains("Deleted 1 group"));
+
+    // Verify all groups are now deleted
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(!response.contains("group0"));
+    assert!(!response.contains("group1"));
+
+    // Verify group members were properly cleaned up
+    let count = query!("SELECT COUNT(*) as count FROM group_members",)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count.count, 0);
+
+    // Test deleting non-existent group
+    let response = send_message(&pool, "+1234567890", "delete nonexistent").await?;
+    assert!(response.contains("No groups or contacts found"));
+
+    // Test separate deletion of group and contact
+    // First recreate a group
+    let _response = send_message(&pool, "+1234567890", "group Alice, Bob").await?;
+    let response = send_message(&pool, "+1234567890", "confirm 1,2").await?;
+    assert!(response.contains("Created group \"group0\""));
+    assert!(response.contains("Alice"));
+    assert!(response.contains("Bob"));
+
+    // Delete contact
+    let response = send_message(&pool, "+1234567890", "delete Alice").await?;
+    assert!(response.contains("Found these contacts:"));
+    assert!(response.contains("Alice Smith"));
+    let response = send_message(&pool, "+1234567890", "confirm 1").await?;
+    assert!(response.contains("Deleted 1 contact"));
+
+    // Delete group
+    let response = send_message(&pool, "+1234567890", "delete group0").await?;
+    assert!(response.contains("Found these groups:"));
+    assert!(response.contains("group0"));
+    let response = send_message(&pool, "+1234567890", "confirm 1").await?;
+    assert!(response.contains("Deleted 1 group"));
+
+    // Verify both were deleted
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    assert!(!response.contains("group0"));
+    assert!(!response.contains("Alice Smith"));
+    assert!(response.contains("Bob Wilson")); // Other contacts remain
+
+    Ok(())
+}

@@ -392,6 +392,32 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
 
 async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
     let like = format!("%{}%", name.to_lowercase());
+
+    // Find matching groups
+    let groups = query_as!(
+        GroupRecord,
+        r#"WITH member_counts AS (
+            SELECT 
+                group_id,
+                COUNT(*) as count
+            FROM group_members
+            GROUP BY group_id
+        )
+        SELECT 
+            groups.id as "id!", 
+            groups.name,
+            COALESCE(mc.count, 0) as "member_count!"
+        FROM groups 
+        LEFT JOIN member_counts mc ON mc.group_id = groups.id
+        WHERE creator_number = ? 
+        AND LOWER(name) LIKE ?
+        ORDER BY name"#,
+        from,
+        like
+    )
+    .fetch_all(pool)
+    .await?;
+    // Find matching contacts (rest of the code unchanged)
     let contacts = query_as!(
         Contact,
         "SELECT id as \"id!\", contact_name, contact_user_number 
@@ -405,8 +431,8 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     .fetch_all(pool)
     .await?;
 
-    if contacts.is_empty() {
-        return Ok(format!("No contacts found matching \"{}\"", name));
+    if groups.is_empty() && contacts.is_empty() {
+        return Ok(format!("No groups or contacts found matching \"{}\"", name));
     }
 
     let mut tx = pool.begin().await?;
@@ -414,11 +440,23 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
     // Set pending action type to deletion
     set_pending_action(pool, from, "deletion", &mut tx).await?;
 
+    // Store groups for deletion
+    for group in &groups {
+        query!(
+            "INSERT INTO pending_deletions (pending_action_submitter, group_id, contact_id) 
+             VALUES (?, ?, NULL)",
+            from,
+            group.id
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
     // Store contacts for deletion
     for contact in &contacts {
         query!(
-            "INSERT INTO pending_deletions (pending_action_submitter, contact_id) 
-             VALUES (?, ?)",
+            "INSERT INTO pending_deletions (pending_action_submitter, group_id, contact_id) 
+             VALUES (?, NULL, ?)",
             from,
             contact.id
         )
@@ -428,26 +466,57 @@ async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::R
 
     tx.commit().await?;
 
-    let list = contacts
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
+    let mut response = String::new();
+
+    // List groups if any were found
+    if !groups.is_empty() {
+        response.push_str("Found these groups:\n");
+        for (i, group) in groups.iter().enumerate() {
+            response.push_str(&format!(
+                "{}. {} ({} members)\n",
+                i + 1,
+                group.name,
+                group.member_count
+            ));
+        }
+    }
+
+    // List contacts if any were found, continuing the numbering
+    if !contacts.is_empty() {
+        if !groups.is_empty() {
+            response.push_str("\n");
+        }
+        response.push_str("Found these contacts:\n");
+        let offset = groups.len();
+        for (i, c) in contacts.iter().enumerate() {
             let area_code = E164::from_str(&c.contact_user_number)
                 .map(|e| e.area_code().to_string())
                 .unwrap_or_else(|_| "???".to_string());
 
-            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+            response.push_str(&format!(
+                "{}. {} ({})\n",
+                i + offset + 1,
+                c.contact_name,
+                area_code
+            ));
+        }
+    }
 
-    Ok(format!(
-        "Found these contacts matching \"{}\":\n{}\n\n\
-        To delete contacts, reply \"confirm NUM1, NUM2, ...\", \
-        where NUM1, NUM2, etc. are numbers from the list above.",
-        name, list
-    ))
+    response.push_str(
+        "\nTo delete items, reply \"confirm NUM1, NUM2, ...\", \
+        where NUM1, NUM2, etc. are numbers from the lists above.",
+    );
+
+    Ok(response)
 }
+
+#[derive(Clone, sqlx::FromRow)]
+struct GroupRecord {
+    id: i64,
+    name: String,
+    member_count: i64,
+}
+
 async fn handle_confirm(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -614,44 +683,80 @@ async fn handle_confirm(
             Ok(response)
         }
         "deletion" => {
-            // Existing deletion logic remains the same
             let mut invalid = Vec::new();
+            let mut selected_groups = Vec::new();
             let mut selected_contacts = Vec::new();
 
+            // Get total number of pending items to validate selection range
+            let groups = query_as!(
+                GroupRecord,
+                r#"WITH member_counts AS (
+                    SELECT 
+                        group_id,
+                        COUNT(*) as count
+                    FROM group_members
+                    GROUP BY group_id
+                )
+                SELECT 
+                    g.id as "id!", 
+                    g.name,
+                    COALESCE(mc.count, 0) as "member_count!"
+                FROM groups g
+                JOIN pending_deletions pd ON pd.group_id = g.id
+                LEFT JOIN member_counts mc ON mc.group_id = g.id
+                WHERE pd.pending_action_submitter = ?
+                ORDER BY g.name"#,
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+            let contacts = query_as!(
+                Contact,
+                "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
+                 FROM contacts c
+                 JOIN pending_deletions pd ON pd.contact_id = c.id
+                 WHERE pd.pending_action_submitter = ?
+                 ORDER BY c.contact_name",
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+
+            // Process selections
             for num_str in selections.split(',').map(str::trim) {
                 match num_str.parse::<usize>() {
                     Ok(num) if num > 0 => {
-                        let offset = (num - 1) as i64;
-                        let query = query!(
-                            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
-                             FROM contacts c
-                             JOIN pending_deletions pd ON pd.contact_id = c.id
-                             WHERE pd.pending_action_submitter = ?
-                             ORDER BY c.contact_name
-                             LIMIT 1 OFFSET ?",
-                            from,
-                            offset
-                        );
-                        if let Some(row) = query.fetch_optional(pool).await? {
-                            selected_contacts.push(Contact {
-                                id: row.id,
-                                contact_name: row.contact_name,
-                                contact_user_number: row.contact_user_number,
+                        let num = num - 1; // Convert to 0-based index
+                        if num < groups.len() {
+                            selected_groups.push(GroupRecord {
+                                id: groups[num].id,
+                                name: groups[num].name.clone(),
+                                member_count: groups[num].member_count,
                             });
+                        } else if num < groups.len() + contacts.len() {
+                            selected_contacts.push(contacts[num - groups.len()].clone());
                         } else {
-                            invalid.push(format!("Invalid selection: {}", num));
+                            invalid.push(format!("Invalid selection: {}", num + 1));
                         }
                     }
-                    _ => invalid.push(format!("Invalid number: {}", num_str)),
+                    _ => invalid.push(format!("Invalid selection: {}", num_str)),
                 }
             }
 
-            if selected_contacts.is_empty() && invalid.is_empty() {
+            if selected_groups.is_empty() && selected_contacts.is_empty() && invalid.is_empty() {
                 return Ok("No valid selections provided.".to_string());
             }
 
             let mut tx = pool.begin().await?;
 
+            // Delete selected groups
+            for group in &selected_groups {
+                query!("DELETE FROM groups WHERE id = ?", group.id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            // Delete selected contacts
             for contact in &selected_contacts {
                 query!("DELETE FROM contacts WHERE id = ?", contact.id)
                     .execute(&mut *tx)
@@ -668,25 +773,48 @@ async fn handle_confirm(
 
             tx.commit().await?;
 
-            let mut response = format!(
-                "Deleted {} contact{}:\n",
-                selected_contacts.len(),
-                if selected_contacts.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            );
+            // Format response
+            let mut response = String::new();
 
-            for contact in selected_contacts {
-                let area_code = E164::from_str(&contact.contact_user_number)
-                    .map(|e| e.area_code().to_string())
-                    .unwrap_or_else(|_| "???".to_string());
-                response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
+            if !selected_groups.is_empty() {
+                response.push_str(&format!(
+                    "Deleted {} group{}:\n",
+                    selected_groups.len(),
+                    if selected_groups.len() == 1 { "" } else { "s" }
+                ));
+                for group in selected_groups {
+                    response.push_str(&format!(
+                        "• {} ({} members)\n",
+                        group.name, group.member_count
+                    ));
+                }
+            }
+            if !selected_contacts.is_empty() {
+                if !response.is_empty() {
+                    response.push_str("\n");
+                }
+                response.push_str(&format!(
+                    "Deleted {} contact{}:\n",
+                    selected_contacts.len(),
+                    if selected_contacts.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ));
+                for contact in selected_contacts {
+                    let area_code = E164::from_str(&contact.contact_user_number)
+                        .map(|e| e.area_code().to_string())
+                        .unwrap_or_else(|_| "???".to_string());
+                    response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
+                }
             }
 
             if !invalid.is_empty() {
-                response.push_str("\nErrors:\n");
+                if !response.is_empty() {
+                    response.push_str("\n");
+                }
+                response.push_str("Errors:\n");
                 response.push_str(&invalid.join("\n"));
             }
 
