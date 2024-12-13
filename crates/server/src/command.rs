@@ -34,6 +34,7 @@ struct ParameterDoc {
     example: String,
     description: String,
 }
+
 impl Command {
     pub fn description(&self) -> String {
         match self {
