@@ -315,7 +315,6 @@ async fn handle_help(pool: &Pool<Sqlite>, from: &str) -> Result<String> {
 
     Ok(response)
 }
-
 async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::Result<String> {
     let name_fragments: Vec<_> = names.split(',').map(str::trim).collect();
 
@@ -324,7 +323,10 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
     }
 
     let mut contacts = Vec::new();
+    let mut groups = Vec::new();
+
     for fragment in &name_fragments {
+        // Search for matching contacts
         let like = format!("%{}%", fragment.to_lowercase());
         let mut matches = query_as!(
             Contact,
@@ -339,15 +341,45 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
         .fetch_all(pool)
         .await?;
         contacts.append(&mut matches);
+
+        // Search for matching groups
+        let mut group_matches = query_as!(
+            GroupRecord,
+            r#"WITH member_counts AS (
+                SELECT 
+                    group_id,
+                    COUNT(*) as count
+                FROM group_members
+                GROUP BY group_id
+            )
+            SELECT 
+                groups.id as "id!", 
+                groups.name,
+                COALESCE(mc.count, 0) as "member_count!"
+            FROM groups 
+            LEFT JOIN member_counts mc ON mc.group_id = groups.id
+            WHERE creator_number = ? 
+            AND LOWER(name) LIKE ?
+            ORDER BY name"#,
+            from,
+            like
+        )
+        .fetch_all(pool)
+        .await?;
+        groups.append(&mut group_matches);
     }
 
     contacts.sort_by(|a, b| a.id.cmp(&b.id));
     contacts.dedup_by(|a, b| a.id == b.id);
     contacts.sort_by(|a, b| a.contact_name.cmp(&b.contact_name));
 
-    if contacts.is_empty() {
+    groups.sort_by(|a, b| a.id.cmp(&b.id));
+    groups.dedup_by(|a, b| a.id == b.id);
+    groups.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if contacts.is_empty() && groups.is_empty() {
         return Ok(format!(
-            "No contacts found matching: {}",
+            "No contacts or groups found matching: {}",
             name_fragments.join(", ")
         ));
     }
@@ -356,6 +388,14 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
 
     // Set pending action type to group
     set_pending_action(pool, from, "group", &mut tx).await?;
+
+    // First, clear any existing pending group members
+    query!(
+        "DELETE FROM pending_group_members WHERE pending_action_submitter = ?",
+        from
+    )
+    .execute(&mut *tx)
+    .await?;
 
     // Store contacts for group creation
     for contact in &contacts {
@@ -369,25 +409,79 @@ async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::R
         .await?;
     }
 
+    // Add members from each selected group
+    for group in &groups {
+        // Get the actual contact records for this group's members
+        let member_contacts = query!(
+            r#"
+            SELECT DISTINCT c.id
+            FROM group_members gm
+            JOIN contacts c ON c.contact_user_number = gm.member_number 
+            WHERE gm.group_id = ? AND c.submitter_number = ?
+            "#,
+            group.id,
+            from
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        // Add each member's contact record
+        for member in member_contacts {
+            query!(
+                "INSERT OR IGNORE INTO pending_group_members (pending_action_submitter, contact_id)
+                VALUES (?, ?)",
+                from,
+                member.id
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
     tx.commit().await?;
 
-    let list = contacts
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
+    let mut response = String::new();
+
+    // List groups if any were found
+    if !groups.is_empty() {
+        response.push_str("Found these groups:\n");
+        for (i, group) in groups.iter().enumerate() {
+            response.push_str(&format!(
+                "{}. {} ({} members)\n",
+                i + 1,
+                group.name,
+                group.member_count
+            ));
+        }
+    }
+
+    // List contacts if any were found, continuing the numbering
+    if !contacts.is_empty() {
+        if !response.is_empty() {
+            response.push_str("\n");
+        }
+        response.push_str("Found these contacts:\n");
+        let offset = groups.len();
+        for (i, c) in contacts.iter().enumerate() {
             let area_code = E164::from_str(&c.contact_user_number)
                 .map(|e| e.area_code().to_string())
                 .unwrap_or_else(|_| "???".to_string());
 
-            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+            response.push_str(&format!(
+                "{}. {} ({})\n",
+                i + offset + 1,
+                c.contact_name,
+                area_code
+            ));
+        }
+    }
 
-    Ok(format!(
-        "Found these contacts:\n{}\n\nTo create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"",
-        list
-    ))
+    response.push_str(
+        "\nTo create a group with the selected items, reply \"confirm NUM1, NUM2, ...\", \
+        where NUM1, NUM2, etc. are numbers from the lists above.",
+    );
+
+    Ok(response)
 }
 
 async fn handle_delete(pool: &Pool<Sqlite>, from: &str, name: &str) -> anyhow::Result<String> {
@@ -516,7 +610,6 @@ struct GroupRecord {
     name: String,
     member_count: i64,
 }
-
 async fn handle_confirm(
     pool: &Pool<Sqlite>,
     from: &str,
@@ -821,39 +914,99 @@ async fn handle_confirm(
             Ok(response)
         }
         "group" => {
-            // Existing group creation logic remains the same
             let mut invalid = Vec::new();
-            let mut selected_contacts = Vec::new();
 
+            // First, get all the available items for selection
+            let available_groups = query!(
+                r#"
+                SELECT g.id as "id!", g.name
+                FROM groups g
+                WHERE g.creator_number = ?
+                ORDER BY g.name
+                "#,
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+
+            // Get contacts that have been queued for selection
+            let available_contacts = query!(
+                r#"
+                SELECT 
+                    c.id as "id!", 
+                    c.contact_name,
+                    c.contact_user_number
+                FROM contacts c
+                WHERE c.submitter_number = ? 
+                AND c.id IN (
+                    SELECT pgm.contact_id
+                    FROM pending_group_members pgm
+                    WHERE pgm.pending_action_submitter = ?
+                )
+                ORDER BY c.contact_name
+                "#,
+                from,
+                from
+            )
+            .fetch_all(pool)
+            .await?;
+
+            let mut selected_contact_ids = Vec::new();
+
+            // Process selections
             for num_str in selections.split(',').map(str::trim) {
                 match num_str.parse::<usize>() {
                     Ok(num) if num > 0 => {
-                        let offset = (num - 1) as i64;
-                        let query = query!(
-                            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
-                             FROM contacts c
-                             JOIN pending_group_members pgm ON pgm.contact_id = c.id
-                             WHERE pgm.pending_action_submitter = ?
-                             ORDER BY c.contact_name
-                             LIMIT 1 OFFSET ?",
-                            from,
-                            offset
-                        );
-                        if let Some(row) = query.fetch_optional(pool).await? {
-                            selected_contacts.push(Contact {
-                                id: row.id,
-                                contact_name: row.contact_name,
-                                contact_user_number: row.contact_user_number,
-                            });
+                        let num = num - 1; // Convert to 0-based index
+                        if num < available_groups.len() {
+                            // Selected a group - get all its members
+                            let group_members = query!(
+                                r#"SELECT DISTINCT c.id as "id!"
+                                FROM contacts c
+                                JOIN group_members gm ON c.contact_user_number = gm.member_number 
+                                WHERE gm.group_id = ? AND c.submitter_number = ?"#,
+                                available_groups[num].id,
+                                from
+                            )
+                            .fetch_all(pool)
+                            .await?;
+                            selected_contact_ids.extend(group_members.iter().map(|m| m.id));
+                        } else if num < available_groups.len() + available_contacts.len() {
+                            // Selected an individual contact
+                            let contact = &available_contacts[num - available_groups.len()];
+                            selected_contact_ids.push(contact.id);
                         } else {
-                            invalid.push(format!("Invalid selection: {}", num));
+                            invalid.push(format!("Invalid selection: {}", num + 1));
                         }
                     }
                     _ => invalid.push(format!("Invalid number: {}", num_str)),
                 }
             }
 
-            create_group(pool, from, selected_contacts, invalid).await
+            // Clear existing pending members and add new ones
+            let mut tx = pool.begin().await?;
+
+            query!(
+                "DELETE FROM pending_group_members WHERE pending_action_submitter = ?",
+                from
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            for contact_id in selected_contact_ids {
+                query!(
+                    "INSERT INTO pending_group_members (pending_action_submitter, contact_id) 
+                     VALUES (?, ?)",
+                    from,
+                    contact_id
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            tx.commit().await?;
+
+            create_group(pool, from, invalid).await
         }
         _ => Ok("Invalid action type".to_string()),
     }
@@ -862,7 +1015,6 @@ async fn handle_confirm(
 async fn create_group(
     pool: &Pool<Sqlite>,
     from: &str,
-    contacts: Vec<Contact>,
     invalid: Vec<String>,
 ) -> anyhow::Result<String> {
     let mut group_num = 0;
@@ -886,6 +1038,7 @@ async fn create_group(
 
     let mut tx = pool.begin().await?;
 
+    // Create the new group
     query!(
         "INSERT INTO groups (name, creator_number) VALUES (?, ?)",
         group_name,
@@ -903,11 +1056,28 @@ async fn create_group(
     .await?
     .id;
 
-    for contact in &contacts {
+    // Get selected contacts directly from pending_group_members
+    let members = query!(
+        r#"
+        SELECT DISTINCT c.contact_user_number, c.contact_name
+        FROM contacts c 
+        JOIN pending_group_members pgm ON pgm.contact_id = c.id
+        WHERE pgm.pending_action_submitter = ?
+        AND c.submitter_number = ?
+        ORDER BY c.contact_name
+        "#,
+        from,
+        from
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    // Insert members
+    for member in &members {
         query!(
             "INSERT INTO group_members (group_id, member_number) VALUES (?, ?)",
             group_id,
-            contact.contact_user_number
+            member.contact_user_number
         )
         .execute(&mut *tx)
         .await?;
@@ -923,17 +1093,18 @@ async fn create_group(
 
     tx.commit().await?;
 
+    // Format response
     let mut response = format!(
         "Created group \"{}\" with {} members:\n",
         group_name,
-        contacts.len()
+        members.len()
     );
 
-    for contact in contacts {
-        let area_code = E164::from_str(&contact.contact_user_number)
+    for member in members {
+        let area_code = E164::from_str(&member.contact_user_number)
             .map(|e| e.area_code().to_string())
             .unwrap_or_else(|_| "???".to_string());
-        response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
+        response.push_str(&format!("• {} ({})\n", member.contact_name, area_code));
     }
 
     if !invalid.is_empty() {

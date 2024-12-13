@@ -441,3 +441,155 @@ async fn test_group_deletion(pool: Pool<Sqlite>) -> Result<()> {
 
     Ok(())
 }
+#[sqlx::test]
+async fn test_group_creation_with_nested_groups(pool: Pool<Sqlite>) -> Result<()> {
+    setup_db(&pool).await?;
+
+    // Register main user
+    send_message(&pool, "+1234567890", "name John Doe").await?;
+
+    // Add some contacts first
+    let contacts = [
+        ("Alice Smith", "+19876543210"),
+        ("Bob Wilson", "+19876543211"),
+        ("Carol Brown", "+19876543212"),
+        ("David Jones", "+19876543213"),
+        ("Eve Adams", "+19876543214"),
+    ];
+
+    for (name, number) in contacts {
+        let vcard = format!(
+            "BEGIN:VCARD\nVERSION:3.0\nFN:{}\nTEL:{}\nEND:VCARD\n",
+            name, number
+        );
+        let mut reader = ical::VcardParser::new(vcard.as_bytes());
+        process_vcard(&pool, "+1234567890", reader.next().unwrap()).await?;
+    }
+
+    // Create first group with Alice and Bob
+    let response = send_message(&pool, "+1234567890", "group Alice, Bob").await?;
+    println!("First group search response: {}", response);
+    assert!(response.contains("Found these contacts"));
+    let response = send_message(&pool, "+1234567890", "confirm 1,2").await?;
+    println!("First group creation response: {}", response);
+    assert!(response.contains("Created group \"group0\""));
+    assert!(response.contains("Alice Smith"));
+    assert!(response.contains("Bob Wilson"));
+
+    // Create second group with Carol and David
+    let response = send_message(&pool, "+1234567890", "group Carol, David").await?;
+    println!("Second group search response: {}", response);
+    assert!(response.contains("Found these contacts"));
+    let response = send_message(&pool, "+1234567890", "confirm 1,2").await?;
+    println!("Second group creation response: {}", response);
+    assert!(response.contains("Created group \"group1\""));
+    assert!(response.contains("Carol Brown"));
+    assert!(response.contains("David Jones"));
+
+    // Verify both groups exist and have correct members
+    let response = send_message(&pool, "+1234567890", "contacts").await?;
+    println!("Contacts list before final group: {}", response);
+
+    // Now create a new group combining individual contact (Eve) and existing groups
+    let response = send_message(&pool, "+1234567890", "group Eve, group0, group1").await?;
+    println!("Combined group search response: {}", response);
+    assert!(response.contains("Found these groups:"));
+    assert!(response.contains("group0 (2 members)"));
+    assert!(response.contains("group1 (2 members)"));
+    assert!(response.contains("Found these contacts:"));
+    assert!(response.contains("Eve Adams"));
+
+    // Confirm creation of combined group
+    let response = send_message(&pool, "+1234567890", "confirm 1,2,3").await?;
+    println!("Final group creation response: {}", response);
+    assert!(response.contains("Created group \"group2\""));
+
+    // Debug query to check group members directly from database
+    let members = query!(
+        r#"
+        SELECT DISTINCT c.contact_name
+        FROM group_members gm
+        JOIN contacts c ON c.contact_user_number = gm.member_number
+        WHERE gm.group_id = (
+            SELECT id FROM groups 
+            WHERE creator_number = ? AND name = 'group2'
+        )
+        ORDER BY c.contact_name
+        "#,
+        "+1234567890"
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    println!("Direct database query for group2 members:");
+    for member in &members {
+        println!("Member: {}", member.contact_name);
+    }
+
+    // Verify all members are included
+    assert!(response.contains("Alice Smith"));
+    assert!(response.contains("Bob Wilson"));
+    assert!(response.contains("Carol Brown"));
+    assert!(response.contains("David Jones"));
+    assert!(response.contains("Eve Adams"));
+    assert!(response.contains("5 members")); // Verify total member count
+
+    Ok(())
+}
+
+#[sqlx::test]
+async fn test_group_creation_subset_selection(pool: Pool<Sqlite>) -> Result<()> {
+    setup_db(&pool).await?;
+
+    // Register user
+    send_message(&pool, "+1234567890", "name John Doe").await?;
+
+    // Add some test contacts
+    let contacts = [
+        ("Alice Smith", "+19876543210"),
+        ("Bob Wilson", "+19876543211"),
+        ("Carol Brown", "+19876543212"),
+        ("David Jones", "+19876543213"),
+    ];
+
+    for (name, number) in contacts {
+        let vcard = format!(
+            "BEGIN:VCARD\nVERSION:3.0\nFN:{}\nTEL:{}\nEND:VCARD\n",
+            name, number
+        );
+        let mut reader = ical::VcardParser::new(vcard.as_bytes());
+        process_vcard(&pool, "+1234567890", reader.next().unwrap()).await?;
+    }
+
+    // Search for all contacts containing "i" (should match Alice, David)
+    let response = send_message(&pool, "+1234567890", "group i").await?;
+    assert!(response.contains("Found these contacts"));
+    assert!(response.contains("Alice Smith"));
+    assert!(response.contains("David Jones"));
+
+    // Only select Alice
+    let response = send_message(&pool, "+1234567890", "confirm 1").await?;
+    assert!(response.contains("Created group \"group0\""));
+    assert!(response.contains("Alice Smith"));
+    assert!(!response.contains("David Jones"));
+
+    // Verify group contents directly in database
+    let members = query!(
+        "SELECT c.contact_name 
+         FROM group_members gm
+         JOIN contacts c ON c.contact_user_number = gm.member_number
+         WHERE gm.group_id = (
+             SELECT id FROM groups 
+             WHERE creator_number = ? AND name = 'group0'
+         )
+         ORDER BY c.contact_name",
+        "+1234567890"
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].contact_name, "Alice Smith");
+
+    Ok(())
+}
