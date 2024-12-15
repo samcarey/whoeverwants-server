@@ -38,13 +38,13 @@ struct ParameterDoc {
 impl Command {
     pub fn description(&self) -> String {
         match self {
-            Self::h => "show a list of available commands",
+            Self::h => "show a list of available commands and any pending actions",
             Self::info => "see information about a command",
             Self::name => "set your preferred name",
             Self::stop => "stop receiving messages and remove yourself from the database",
             Self::contacts => "see a list of your groups and contacts",
             Self::delete => "delete a contact by name",
-            Self::confirm => "confirm pending action(s)",
+            Self::confirm => "confirm pending actions",
             Self::group => "create a new group from your contacts",
         }
         .to_string()
