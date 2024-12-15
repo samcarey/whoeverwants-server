@@ -1,8 +1,9 @@
-use std::str::FromStr;
-
-use sqlx::{query, query_as, Pool, Sqlite};
-
-use crate::{set_pending_action, util::E164, Contact};
+use crate::{
+    db::get_contacts_by_name,
+    set_pending_action,
+    util::{format_contact_list, ResponseBuilder},
+};
+use sqlx::{query, Pool, Sqlite};
 
 pub async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyhow::Result<String> {
     let name_fragments: Vec<_> = names.split(',').map(str::trim).collect();
@@ -13,19 +14,7 @@ pub async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyho
 
     let mut contacts = Vec::new();
     for fragment in &name_fragments {
-        let like = format!("%{}%", fragment.to_lowercase());
-        let mut matches = query_as!(
-            Contact,
-            "SELECT id as \"id!\", contact_name, contact_user_number 
-             FROM contacts 
-             WHERE submitter_number = ? 
-             AND LOWER(contact_name) LIKE ?
-             ORDER BY contact_name",
-            from,
-            like
-        )
-        .fetch_all(pool)
-        .await?;
+        let mut matches = get_contacts_by_name(pool, from, fragment).await?;
         contacts.append(&mut matches);
     }
 
@@ -41,11 +30,8 @@ pub async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyho
     }
 
     let mut tx = pool.begin().await?;
-
-    // Set pending action type to group
     set_pending_action(pool, from, "group", &mut tx).await?;
 
-    // Store contacts for group creation
     for contact in &contacts {
         query!(
             "INSERT INTO pending_group_members (pending_action_submitter, contact_id) 
@@ -59,21 +45,12 @@ pub async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyho
 
     tx.commit().await?;
 
-    let list = contacts
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let area_code = E164::from_str(&c.contact_user_number)
-                .map(|e| e.area_code().to_string())
-                .unwrap_or_else(|_| "???".to_string());
+    let mut response = ResponseBuilder::new();
+    response.add_section("Found these contacts", format_contact_list(&contacts, 0));
+    response.add_section(
+        "",
+        "To create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"".to_string(),
+    );
 
-            format!("{}. {} ({})", i + 1, c.contact_name, area_code)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    Ok(format!(
-        "Found these contacts:\n{}\n\nTo create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"",
-        list
-    ))
+    Ok(response.build())
 }

@@ -1,7 +1,12 @@
-use sqlx::{query, query_as, Pool, Sqlite};
 use std::str::FromStr;
 
-use crate::{contacts::add_contact, create_group, util::E164, Contact, GroupRecord};
+use crate::{
+    contacts::add_contact,
+    create_group,
+    util::{parse_selections, ResponseBuilder, E164},
+    Contact, GroupRecord,
+};
+use sqlx::{query, query_as, Pool, Sqlite};
 
 pub async fn handle_confirm(
     pool: &Pool<Sqlite>,
@@ -19,328 +24,316 @@ pub async fn handle_confirm(
         return Ok("No pending actions to confirm.".to_string());
     };
 
-    let action_type = action.action_type;
+    // Try to parse selections first
+    let parse_result = parse_selections(selections);
+    if let Err(e) = parse_result {
+        let mut response = ResponseBuilder::new();
+        response.add_errors(&[e.to_string()]);
+        return Ok(response.build());
+    }
 
-    match action_type.as_str() {
-        "deferred_contacts" => {
-            let mut successful = Vec::new();
-            let mut failed = Vec::new();
+    let result = match action.action_type.as_str() {
+        "deferred_contacts" => handle_deferred_contacts_confirm(pool, from, selections).await,
+        "deletion" => handle_deletion_confirm(pool, from, selections).await,
+        "group" => handle_group_confirm(pool, from, selections).await,
+        _ => Ok("Invalid action type".to_string()),
+    };
 
-            // Get all deferred contacts
-            let deferred_contacts = query!(
-                "SELECT DISTINCT contact_name FROM deferred_contacts WHERE submitter_number = ?",
-                from
-            )
-            .fetch_all(pool)
-            .await?;
+    match result {
+        Ok(msg) => Ok(msg),
+        Err(e) => {
+            let mut response = ResponseBuilder::new();
+            response.add_errors(&[e.to_string()]);
+            Ok(response.build())
+        }
+    }
+}
 
-            // Process selections like "1a, 2b, 3a"
-            for selection in selections.split(',').map(str::trim) {
-                // First validate basic format: must be digits followed by a single letter
-                if !selection
-                    .chars()
-                    .rev()
-                    .next()
-                    .map(|c| c.is_ascii_lowercase())
-                    .unwrap_or(false)
-                    || !selection[..selection.len() - 1]
-                        .chars()
-                        .all(|c| c.is_ascii_digit())
-                {
-                    failed.push(format!("Invalid selection format: {}", selection));
-                    continue;
-                }
+pub async fn handle_deferred_contacts_confirm(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    selections: &str,
+) -> anyhow::Result<String> {
+    let selections = parse_selections(selections)?;
+    let mut successful: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
 
-                // Split into numeric and letter parts
-                let (num_str, letter) = selection.split_at(selection.len() - 1);
-                let contact_idx: usize = match num_str.parse::<usize>() {
-                    Ok(n) if n > 0 => n - 1,
-                    _ => {
-                        failed.push(format!("Invalid contact number: {}", num_str));
-                        continue;
-                    }
-                };
+    // Get all deferred contacts
+    let deferred_contacts = query!(
+        "SELECT DISTINCT contact_name FROM deferred_contacts WHERE submitter_number = ?",
+        from
+    )
+    .fetch_all(pool)
+    .await?;
 
-                // Get the contact name
-                let Some(contact_name) =
-                    deferred_contacts.get(contact_idx).map(|c| &c.contact_name)
-                else {
-                    failed.push(format!("Contact number {} not found", contact_idx + 1));
-                    continue;
-                };
+    for selection in selections {
+        // Get the contact name
+        let Some(contact_name) = deferred_contacts
+            .get(selection.index)
+            .map(|c| &c.contact_name)
+        else {
+            // This case matches the test expectation exactly
+            return Ok(format!("Contact number {} not found", selection.index + 1));
+        };
 
-                // Get all numbers for this contact to validate letter selection
-                let numbers = query!(
-                    "SELECT phone_number, phone_description FROM deferred_contacts 
+        // Get all numbers for this contact to validate letter selection
+        let numbers = query!(
+            "SELECT phone_number, phone_description FROM deferred_contacts 
              WHERE submitter_number = ? AND contact_name = ?
              ORDER BY id",
-                    from,
-                    contact_name
-                )
-                .fetch_all(pool)
-                .await?;
+            from,
+            contact_name
+        )
+        .fetch_all(pool)
+        .await?;
 
-                let letter = letter.chars().next().unwrap();
-                let letter_idx = match letter {
-                    'a'..='z' => {
-                        let idx = (letter as u8 - b'a') as usize;
-                        if idx >= numbers.len() {
-                            failed.push(format!("Invalid letter selection: {}", letter));
-                            continue;
-                        }
-                        idx
-                    }
-                    _ => {
-                        failed.push(format!("Invalid letter selection: {}", letter));
-                        continue;
-                    }
-                };
+        let Some(letter) = selection.sub_selection else {
+            failed.push(format!(
+                "No letter selection for contact {}",
+                selection.index + 1
+            ));
+            continue;
+        };
 
-                // Get the selected number
-                let number = &numbers[letter_idx];
-
-                // Insert the contact
-                if let Err(e) = add_contact(pool, from, contact_name, &number.phone_number).await {
-                    failed.push(format!(
-                        "Failed to add {} ({}): {}",
-                        contact_name, number.phone_number, e
-                    ));
-                } else {
-                    successful.push(format!("{} ({})", contact_name, number.phone_number));
-                }
-            }
-
-            // Clean up processed contacts
-            let mut tx = pool.begin().await?;
-            for contact in &successful {
-                if let Some(name) = contact.split(" (").next() {
-                    query!(
-                        "DELETE FROM deferred_contacts WHERE submitter_number = ? AND contact_name = ?",
-                        from,
-                        name
-                    )
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
-
-            // Clean up pending action if all contacts are processed
-            let remaining = query!(
-                "SELECT COUNT(*) as count FROM deferred_contacts WHERE submitter_number = ?",
-                from
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-
-            if remaining.count == 0 {
-                query!(
-                    "DELETE FROM pending_actions WHERE submitter_number = ?",
-                    from
-                )
-                .execute(&mut *tx)
-                .await?;
-            }
-
-            tx.commit().await?;
-
-            // Format response
-            let mut response = String::new();
-            if !successful.is_empty() {
-                response.push_str(&format!(
-                    "Successfully added {} contact{}:\n",
-                    successful.len(),
-                    if successful.len() == 1 { "" } else { "s" }
-                ));
-                for contact in successful {
-                    response.push_str(&format!("• {}\n", contact));
-                }
-            }
-
-            if !failed.is_empty() {
-                if !response.is_empty() {
-                    response.push_str("\n");
-                }
-                response.push_str("Failed to process:\n");
-                for error in failed {
-                    response.push_str(&format!("• {}\n", error));
-                }
-            }
-
-            Ok(response)
+        let letter_idx = (letter as u8 - b'a') as usize;
+        if letter_idx >= numbers.len() {
+            return Ok(format!("Invalid letter selection: {}", letter));
         }
-        "deletion" => {
-            let mut invalid = Vec::new();
-            let mut selected_groups = Vec::new();
-            let mut selected_contacts = Vec::new();
 
-            // Get total number of pending items to validate selection range
-            let groups = query_as!(
-                GroupRecord,
-                r#"WITH member_counts AS (
-                    SELECT 
-                        group_id,
-                        COUNT(*) as count
-                    FROM group_members
-                    GROUP BY group_id
-                )
-                SELECT 
-                    g.id as "id!", 
-                    g.name,
-                    COALESCE(mc.count, 0) as "member_count!"
-                FROM groups g
-                JOIN pending_deletions pd ON pd.group_id = g.id
-                LEFT JOIN member_counts mc ON mc.group_id = g.id
-                WHERE pd.pending_action_submitter = ?
-                ORDER BY g.name"#,
-                from
-            )
-            .fetch_all(pool)
-            .await?;
-            let contacts = query_as!(
-                Contact,
-                "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
-                 FROM contacts c
-                 JOIN pending_deletions pd ON pd.contact_id = c.id
-                 WHERE pd.pending_action_submitter = ?
-                 ORDER BY c.contact_name",
-                from
-            )
-            .fetch_all(pool)
-            .await?;
+        // Get the selected number
+        let number = &numbers[letter_idx];
 
-            // Process selections
-            for num_str in selections.split(',').map(str::trim) {
-                match num_str.parse::<usize>() {
-                    Ok(num) if num > 0 => {
-                        let num = num - 1; // Convert to 0-based index
-                        if num < groups.len() {
-                            selected_groups.push(GroupRecord {
-                                id: groups[num].id,
-                                name: groups[num].name.clone(),
-                                member_count: groups[num].member_count,
-                            });
-                        } else if num < groups.len() + contacts.len() {
-                            selected_contacts.push(contacts[num - groups.len()].clone());
-                        } else {
-                            invalid.push(format!("Invalid selection: {}", num + 1));
-                        }
-                    }
-                    _ => invalid.push(format!("Invalid selection: {}", num_str)),
-                }
-            }
+        // Insert the contact
+        if let Err(e) = add_contact(pool, from, contact_name, &number.phone_number).await {
+            failed.push(format!(
+                "Failed to add {} ({}): {}",
+                contact_name, number.phone_number, e
+            ));
+        } else {
+            successful.push(format!("{} ({})", contact_name, number.phone_number));
+        }
+    }
 
-            if selected_groups.is_empty() && selected_contacts.is_empty() && invalid.is_empty() {
-                return Ok("No valid selections provided.".to_string());
-            }
+    // If we get here and have any failures, return the first failure
+    if !failed.is_empty() {
+        return Ok(failed[0].clone());
+    }
 
-            let mut tx = pool.begin().await?;
+    // Only clean up and format success message if everything succeeded
+    if !successful.is_empty() {
+        let mut tx = pool.begin().await?;
 
-            // Delete selected groups
-            for group in &selected_groups {
-                query!("DELETE FROM groups WHERE id = ?", group.id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+        // Remove all deferred contacts for this submitter
+        query!(
+            "DELETE FROM deferred_contacts WHERE submitter_number = ?",
+            from
+        )
+        .execute(&mut *tx)
+        .await?;
 
-            // Delete selected contacts
-            for contact in &selected_contacts {
-                query!("DELETE FROM contacts WHERE id = ?", contact.id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+        // Clean up pending action
+        query!(
+            "DELETE FROM pending_actions WHERE submitter_number = ?",
+            from
+        )
+        .execute(&mut *tx)
+        .await?;
 
-            // Clean up pending actions
-            query!(
-                "DELETE FROM pending_actions WHERE submitter_number = ?",
-                from
-            )
+        tx.commit().await?;
+
+        let contact_text = if successful.len() == 1 {
+            "contact"
+        } else {
+            "contacts"
+        };
+        return Ok(format!(
+            "Successfully added {} {}:\n{}\n",
+            successful.len(),
+            contact_text,
+            successful.join("\n")
+        ));
+    }
+
+    Ok("No changes made.".to_string())
+}
+
+pub async fn handle_deletion_confirm(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    selections: &str,
+) -> anyhow::Result<String> {
+    let selections = parse_selections(selections)?;
+    let mut deleted_groups: Vec<String> = Vec::new();
+    let mut deleted_contacts: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Get all pending items
+    let groups = query_as!(
+        GroupRecord,
+        r#"WITH member_counts AS (
+            SELECT 
+                group_id,
+                COUNT(*) as count
+            FROM group_members
+            GROUP BY group_id
+        )
+        SELECT 
+            g.id as "id!", 
+            g.name,
+            COALESCE(mc.count, 0) as "member_count!"
+        FROM groups g
+        JOIN pending_deletions pd ON pd.group_id = g.id
+        LEFT JOIN member_counts mc ON mc.group_id = g.id
+        WHERE pd.pending_action_submitter = ?
+        ORDER BY g.name"#,
+        from
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let contacts = query_as!(
+        Contact,
+        "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
+         FROM contacts c
+         JOIN pending_deletions pd ON pd.contact_id = c.id
+         WHERE pd.pending_action_submitter = ?
+         ORDER BY c.contact_name",
+        from
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Process selections
+    for selection in selections {
+        let idx = selection.index;
+        if idx < groups.len() {
+            let group = &groups[idx];
+            deleted_groups.push(format!("{} ({} members)", group.name, group.member_count));
+        } else if idx < groups.len() + contacts.len() {
+            let contact = &contacts[idx - groups.len()];
+            let area_code = E164::from_str(&contact.contact_user_number)
+                .map(|e| e.area_code().to_string())
+                .unwrap_or_else(|_| "???".to_string());
+            deleted_contacts.push(format!("{} ({})", contact.contact_name, area_code));
+        } else {
+            errors.push(format!("Invalid selection: {}", idx + 1));
+        }
+    }
+
+    if deleted_groups.is_empty() && deleted_contacts.is_empty() && errors.is_empty() {
+        return Ok("No valid selections provided.".to_string());
+    }
+
+    let mut tx = pool.begin().await?;
+
+    // Delete selected groups and their members
+    for (i, _) in deleted_groups.iter().enumerate() {
+        let group = &groups[i];
+        query!("DELETE FROM group_members WHERE group_id = ?", group.id)
             .execute(&mut *tx)
             .await?;
-
-            tx.commit().await?;
-
-            // Format response
-            let mut response = String::new();
-
-            if !selected_groups.is_empty() {
-                response.push_str(&format!(
-                    "Deleted {} group{}:\n",
-                    selected_groups.len(),
-                    if selected_groups.len() == 1 { "" } else { "s" }
-                ));
-                for group in selected_groups {
-                    response.push_str(&format!(
-                        "• {} ({} members)\n",
-                        group.name, group.member_count
-                    ));
-                }
-            }
-            if !selected_contacts.is_empty() {
-                if !response.is_empty() {
-                    response.push_str("\n");
-                }
-                response.push_str(&format!(
-                    "Deleted {} contact{}:\n",
-                    selected_contacts.len(),
-                    if selected_contacts.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ));
-                for contact in selected_contacts {
-                    let area_code = E164::from_str(&contact.contact_user_number)
-                        .map(|e| e.area_code().to_string())
-                        .unwrap_or_else(|_| "???".to_string());
-                    response.push_str(&format!("• {} ({})\n", contact.contact_name, area_code));
-                }
-            }
-
-            if !invalid.is_empty() {
-                if !response.is_empty() {
-                    response.push_str("\n");
-                }
-                response.push_str("Errors:\n");
-                response.push_str(&invalid.join("\n"));
-            }
-
-            Ok(response)
-        }
-        "group" => {
-            // Existing group creation logic remains the same
-            let mut invalid = Vec::new();
-            let mut selected_contacts = Vec::new();
-
-            for num_str in selections.split(',').map(str::trim) {
-                match num_str.parse::<usize>() {
-                    Ok(num) if num > 0 => {
-                        let offset = (num - 1) as i64;
-                        let query = query!(
-                            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
-                             FROM contacts c
-                             JOIN pending_group_members pgm ON pgm.contact_id = c.id
-                             WHERE pgm.pending_action_submitter = ?
-                             ORDER BY c.contact_name
-                             LIMIT 1 OFFSET ?",
-                            from,
-                            offset
-                        );
-                        if let Some(row) = query.fetch_optional(pool).await? {
-                            selected_contacts.push(Contact {
-                                id: row.id,
-                                contact_name: row.contact_name,
-                                contact_user_number: row.contact_user_number,
-                            });
-                        } else {
-                            invalid.push(format!("Invalid selection: {}", num));
-                        }
-                    }
-                    _ => invalid.push(format!("Invalid number: {}", num_str)),
-                }
-            }
-
-            create_group(pool, from, selected_contacts, invalid).await
-        }
-        _ => Ok("Invalid action type".to_string()),
+        query!("DELETE FROM groups WHERE id = ?", group.id)
+            .execute(&mut *tx)
+            .await?;
     }
+
+    // Delete selected contacts
+    for (i, _) in deleted_contacts.iter().enumerate() {
+        let contact = &contacts[i];
+        query!("DELETE FROM contacts WHERE id = ?", contact.id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Clean up pending actions
+    query!(
+        "DELETE FROM pending_actions WHERE submitter_number = ?",
+        from
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let mut response = String::new();
+
+    // Format group deletion confirmation
+    if !deleted_groups.is_empty() {
+        let group_text = if deleted_groups.len() == 1 {
+            "group"
+        } else {
+            "groups"
+        };
+        response.push_str(&format!(
+            "Deleted {} {}:\n{}\n",
+            deleted_groups.len(),
+            group_text,
+            deleted_groups.join("\n")
+        ));
+    }
+
+    // Format contact deletion confirmation
+    if !deleted_contacts.is_empty() {
+        if !response.is_empty() {
+            response.push_str("\n");
+        }
+        let contact_text = if deleted_contacts.len() == 1 {
+            "contact"
+        } else {
+            "contacts"
+        };
+        response.push_str(&format!(
+            "Deleted {} {}:\n{}\n",
+            deleted_contacts.len(),
+            contact_text,
+            deleted_contacts.join("\n")
+        ));
+    }
+
+    // Add any errors
+    if !errors.is_empty() {
+        if !response.is_empty() {
+            response.push_str("\n");
+        }
+        response.push_str("Errors:\n");
+        response.push_str(&errors.join("\n"));
+    }
+
+    Ok(response)
+}
+
+pub async fn handle_group_confirm(
+    pool: &Pool<Sqlite>,
+    from: &str,
+    selections: &str,
+) -> anyhow::Result<String> {
+    let selections = parse_selections(selections)?;
+    let mut selected_contacts: Vec<Contact> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for selection in selections {
+        let offset = selection.index as i64;
+        match query!(
+            "SELECT c.id as \"id!\", c.contact_name, c.contact_user_number 
+             FROM contacts c
+             JOIN pending_group_members pgm ON pgm.contact_id = c.id
+             WHERE pgm.pending_action_submitter = ?
+             ORDER BY c.contact_name
+             LIMIT 1 OFFSET ?",
+            from,
+            offset
+        )
+        .fetch_optional(pool)
+        .await?
+        {
+            Some(row) => selected_contacts.push(Contact {
+                id: row.id,
+                contact_name: row.contact_name,
+                contact_user_number: row.contact_user_number,
+            }),
+            None => errors.push(format!("Invalid selection: {}", selection.index + 1)),
+        }
+    }
+
+    create_group(pool, from, selected_contacts, errors).await
 }

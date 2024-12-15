@@ -24,6 +24,7 @@ use util::E164;
 mod command;
 mod confirm;
 mod contacts;
+mod db;
 mod delete;
 mod group;
 mod help;
@@ -143,12 +144,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     let command_word = words.next();
     let command = command_word.map(Command::try_from);
 
-    let Some(User {
-        number, name: _, ..
-    }) = query_as!(User, "select * from users where number = ?", from)
-        .fetch_optional(pool)
-        .await?
-    else {
+    let Some(User { number, .. }) = db::get_user(pool, &from).await? else {
         return onboard_new_user(command, words, &from, pool).await;
     };
 
