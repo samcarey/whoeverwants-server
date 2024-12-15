@@ -8,7 +8,7 @@ use crate::{util::E164, ImportResult};
 
 pub async fn process_contact_submission(
     pool: &Pool<Sqlite>,
-    from: &str,
+    from: &E164,
     media_url: &Option<String>,
 ) -> anyhow::Result<String> {
     let vcard_data = reqwest::get(media_url.as_ref().unwrap())
@@ -19,7 +19,7 @@ pub async fn process_contact_submission(
     let mut stats = ImportStats::default();
 
     for vcard in reader {
-        match process_vcard(pool, &from, vcard).await {
+        match process_vcard(pool, from.to_owned(), vcard).await {
             Ok(ImportResult::Added) => stats.added += 1,
             Ok(ImportResult::Updated) => stats.updated += 1,
             Ok(ImportResult::Unchanged) => stats.skipped += 1,
@@ -29,12 +29,17 @@ pub async fn process_contact_submission(
     }
     stats.format_report(pool, &from).await
 }
-pub async fn process_vcard(
+pub async fn process_vcard<T>(
     pool: &Pool<Sqlite>,
-    from: &str,
+    from: T,
     vcard: Result<VcardContact, ical::parser::ParserError>,
-) -> Result<ImportResult> {
-    let user_exists = query!("SELECT * FROM users WHERE number = ?", from)
+) -> Result<ImportResult>
+where
+    E164: TryFrom<T>,
+    <T as TryInto<E164>>::Error: std::fmt::Debug,
+{
+    let from: E164 = from.try_into().unwrap();
+    let user_exists = query!("SELECT * FROM users WHERE number = ?", *from)
         .fetch_optional(pool)
         .await?
         .is_some();
@@ -75,7 +80,7 @@ pub async fn process_vcard(
     // Check existing contacts
     let existing_contacts = query!(
         "SELECT contact_user_number, contact_name FROM contacts WHERE submitter_number = ?",
-        from
+        *from
     )
     .fetch_all(pool)
     .await?;
@@ -90,7 +95,7 @@ pub async fn process_vcard(
                 query!(
                     "UPDATE contacts SET contact_name = ? WHERE submitter_number = ? AND contact_user_number = ?",
                     name,
-                    from,
+                    *from,
                     num
                 )
                 .execute(pool)
@@ -108,7 +113,7 @@ pub async fn process_vcard(
         // First clear any existing deferred contacts for this submitter and contact name
         query!(
             "DELETE FROM deferred_contacts WHERE submitter_number = ? AND contact_name = ?",
-            from,
+            *from,
             name
         )
         .execute(&mut *tx)
@@ -117,7 +122,7 @@ pub async fn process_vcard(
         // Set the pending action type to deferred_contacts
         query!(
             "INSERT OR REPLACE INTO pending_actions (submitter_number, action_type) VALUES (?, 'deferred_contacts')",
-            from
+            *from
         )
         .execute(&mut *tx)
         .await?;
@@ -127,7 +132,7 @@ pub async fn process_vcard(
             query!(
                 "INSERT INTO deferred_contacts (submitter_number, contact_name, phone_number, phone_description) 
                  VALUES (?, ?, ?, ?)",
-                from,
+                *from,
                 name,
                 number,
                 description
@@ -141,12 +146,12 @@ pub async fn process_vcard(
     } else {
         // Single number case - proceed with insertion
         let (number, _) = numbers.into_iter().next().unwrap();
-        add_contact(pool, from, name, &number).await?;
+        add_contact(pool, &from, name, &number).await?;
         Ok(ImportResult::Added)
     }
 }
 
-pub async fn add_contact(pool: &Pool<Sqlite>, from: &str, name: &str, number: &str) -> Result<()> {
+pub async fn add_contact(pool: &Pool<Sqlite>, from: &E164, name: &str, number: &str) -> Result<()> {
     let mut tx = pool.begin().await?;
 
     // Create user if needed
@@ -168,7 +173,7 @@ pub async fn add_contact(pool: &Pool<Sqlite>, from: &str, name: &str, number: &s
     query!(
         "INSERT INTO contacts (submitter_number, contact_name, contact_user_number) 
          VALUES (?, ?, ?)",
-        from,
+        **from,
         name,
         number
     )

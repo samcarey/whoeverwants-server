@@ -1,11 +1,26 @@
 use crate::Contact;
 use anyhow::{bail, Result};
 use std::fmt::Display;
+use std::ops::Deref;
 use std::str::FromStr;
 
 /// E164 phone number format validator and parser
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct E164(String);
+
+impl Deref for E164 {
+    type Target = String;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for E164 {
+    type Error = anyhow::Error;
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        value.parse::<Self>()
+    }
+}
 
 impl E164 {
     /// Returns the area code (NPA) portion of the phone number
@@ -111,6 +126,7 @@ pub struct Selection {
     pub index: usize,
     pub sub_selection: Option<char>,
 }
+
 pub fn parse_selections(input: &str) -> anyhow::Result<Vec<Selection>> {
     // If input consists of only letters, treat it as invalid format
     if input.chars().all(|c| c.is_alphabetic()) {

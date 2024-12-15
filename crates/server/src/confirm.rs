@@ -3,70 +3,73 @@ use std::str::FromStr;
 use crate::{
     contacts::add_contact,
     create_group, get_pending_action_prompt,
-    util::{parse_selections, ResponseBuilder, E164},
-    Contact, GroupRecord,
+    util::{parse_selections, ResponseBuilder, Selection, E164},
+    CommandTrait, Contact, GroupRecord,
 };
 use sqlx::{query, query_as, Pool, Sqlite};
 
-pub async fn handle_confirm(
-    pool: &Pool<Sqlite>,
-    from: &str,
-    selections: &str,
-) -> anyhow::Result<String> {
-    if selections.is_empty() {
-        if let Some(pending_prompt) = get_pending_action_prompt(pool, from).await? {
-            return Ok(pending_prompt);
+pub struct ConfirmCommand {
+    selections: Vec<Selection>,
+}
+
+impl FromStr for ConfirmCommand {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self {
+            selections: parse_selections(s)?,
+        })
+    }
+}
+
+impl CommandTrait for ConfirmCommand {
+    async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
+        let Self { selections } = self;
+        if selections.is_empty() {
+            if let Some(pending_prompt) = get_pending_action_prompt(pool, from).await? {
+                return Ok(pending_prompt);
+            }
         }
-    }
-    let pending_action = query!(
-        "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
-        from
-    )
-    .fetch_optional(pool)
-    .await?;
+        let pending_action = query!(
+            "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
+            **from
+        )
+        .fetch_optional(pool)
+        .await?;
 
-    let Some(action) = pending_action else {
-        return Ok("No pending actions to confirm.".to_string());
-    };
+        let Some(action) = pending_action else {
+            return Ok("No pending actions to confirm.".to_string());
+        };
 
-    // Try to parse selections first
-    let parse_result = parse_selections(selections);
-    if let Err(e) = parse_result {
-        let mut response = ResponseBuilder::new();
-        response.add_errors(&[e.to_string()]);
-        return Ok(response.build());
-    }
+        let result = match action.action_type.as_str() {
+            "deferred_contacts" => handle_deferred_contacts_confirm(pool, from, selections).await,
+            "deletion" => handle_deletion_confirm(pool, from, selections).await,
+            "group" => handle_group_confirm(pool, from, selections).await,
+            _ => Ok("Invalid action type".to_string()),
+        };
 
-    let result = match action.action_type.as_str() {
-        "deferred_contacts" => handle_deferred_contacts_confirm(pool, from, selections).await,
-        "deletion" => handle_deletion_confirm(pool, from, selections).await,
-        "group" => handle_group_confirm(pool, from, selections).await,
-        _ => Ok("Invalid action type".to_string()),
-    };
-
-    match result {
-        Ok(msg) => Ok(msg),
-        Err(e) => {
-            let mut response = ResponseBuilder::new();
-            response.add_errors(&[e.to_string()]);
-            Ok(response.build())
+        match result {
+            Ok(msg) => Ok(msg),
+            Err(e) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[e.to_string()]);
+                Ok(response.build())
+            }
         }
     }
 }
 
 pub async fn handle_deferred_contacts_confirm(
     pool: &Pool<Sqlite>,
-    from: &str,
-    selections: &str,
+    from: &E164,
+    selections: &[Selection],
 ) -> anyhow::Result<String> {
-    let selections = parse_selections(selections)?;
     let mut successful: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
 
     // Get all deferred contacts
     let deferred_contacts = query!(
         "SELECT DISTINCT contact_name FROM deferred_contacts WHERE submitter_number = ?",
-        from
+        **from
     )
     .fetch_all(pool)
     .await?;
@@ -86,7 +89,7 @@ pub async fn handle_deferred_contacts_confirm(
             "SELECT phone_number, phone_description FROM deferred_contacts 
              WHERE submitter_number = ? AND contact_name = ?
              ORDER BY id",
-            from,
+            **from,
             contact_name
         )
         .fetch_all(pool)
@@ -131,7 +134,7 @@ pub async fn handle_deferred_contacts_confirm(
         // Remove all deferred contacts for this submitter
         query!(
             "DELETE FROM deferred_contacts WHERE submitter_number = ?",
-            from
+            **from
         )
         .execute(&mut *tx)
         .await?;
@@ -139,7 +142,7 @@ pub async fn handle_deferred_contacts_confirm(
         // Clean up pending action
         query!(
             "DELETE FROM pending_actions WHERE submitter_number = ?",
-            from
+            **from
         )
         .execute(&mut *tx)
         .await?;
@@ -165,9 +168,8 @@ pub async fn handle_deferred_contacts_confirm(
 pub async fn handle_deletion_confirm(
     pool: &Pool<Sqlite>,
     from: &str,
-    selections: &str,
+    selections: &[Selection],
 ) -> anyhow::Result<String> {
-    let selections = parse_selections(selections)?;
     let mut deleted_groups: Vec<String> = Vec::new();
     let mut deleted_contacts: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -310,9 +312,8 @@ pub async fn handle_deletion_confirm(
 pub async fn handle_group_confirm(
     pool: &Pool<Sqlite>,
     from: &str,
-    selections: &str,
+    selections: &[Selection],
 ) -> anyhow::Result<String> {
-    let selections = parse_selections(selections)?;
     let mut selected_contacts: Vec<Contact> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 

@@ -5,7 +5,7 @@ use axum::{
     routing::post,
     Extension, Form, Router,
 };
-use confirm::handle_confirm;
+use confirm::ConfirmCommand;
 use contacts::process_contact_submission;
 use delete::handle_delete;
 use dotenv::dotenv;
@@ -19,7 +19,7 @@ use openapi::apis::{
 use sqlx::{query, query_as, Pool, Sqlite};
 use std::env;
 use std::str::FromStr;
-use util::E164;
+use util::{ResponseBuilder, E164};
 
 mod command;
 mod confirm;
@@ -99,6 +99,10 @@ enum ImportResult {
     Deferred,
 }
 
+trait CommandTrait {
+    async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String>;
+}
+
 // Handler for incoming SMS messages
 async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
@@ -131,6 +135,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         MediaContentType0: media_type_0,
         MediaUrl0: media_url_0,
     } = message;
+    let from = E164::from_str(&from)?;
     debug!("Received from {from}: {body}");
     if media_count == Some("1".to_string())
         && media_type_0
@@ -165,7 +170,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         Command::h => handle_help(pool, &from).await?,
         Command::name => match process_name(words) {
             Ok(name) => {
-                query!("update users set name = ? where number = ?", name, from)
+                query!("update users set name = ? where number = ?", name, *from)
                     .execute(pool)
                     .await?;
                 format!("Your name has been updated to \"{name}\"")
@@ -205,7 +210,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                  WHERE g.creator_number = ?
                  GROUP BY g.id, g.name
                  ORDER BY g.name",
-                from
+                *from
             )
             .fetch_all(pool)
             .await?;
@@ -217,7 +222,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                  FROM contacts 
                  WHERE submitter_number = ? 
                  ORDER BY contact_name",
-                from
+                *from
             )
             .fetch_all(pool)
             .await?;
@@ -278,7 +283,14 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         }
         Command::confirm => {
             let nums = words.collect::<Vec<_>>().join(" ");
-            handle_confirm(pool, &from, &nums).await?
+            match ConfirmCommand::from_str(&nums) {
+                Ok(command) => command.handle(pool, &from).await?,
+                Err(error) => {
+                    let mut response = ResponseBuilder::new();
+                    response.add_errors(&[error.to_string()]);
+                    response.build()
+                }
+            }
         }
         Command::group => {
             let names = words.collect::<Vec<_>>().join(" ");
@@ -472,10 +484,10 @@ async fn set_pending_action(
     Ok(())
 }
 
-async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Option<String>> {
+async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &E164) -> Result<Option<String>> {
     let pending = query!(
         "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
-        from
+        **from
     )
     .fetch_optional(pool)
     .await?;
@@ -490,7 +502,7 @@ async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Op
                          JOIN contacts c ON c.id = pd.contact_id 
                          WHERE pd.pending_action_submitter = ?
                          ORDER BY c.contact_name",
-                        from
+                        **from
                     )
                     .fetch_all(pool)
                     .await?;
@@ -522,7 +534,7 @@ async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Op
                         "SELECT DISTINCT contact_name FROM deferred_contacts 
                          WHERE submitter_number = ? 
                          ORDER BY contact_name",
-                        from
+                        **from
                     )
                     .fetch_all(pool)
                     .await?;
@@ -542,7 +554,7 @@ async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Op
                              FROM deferred_contacts 
                              WHERE submitter_number = ? AND contact_name = ?
                              ORDER BY id",
-                            from,
+                            **from,
                             contact.contact_name
                         )
                         .fetch_all(pool)
@@ -571,7 +583,7 @@ async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Op
                          JOIN contacts c ON c.id = pgm.contact_id 
                          WHERE pgm.pending_action_submitter = ?
                          ORDER BY c.contact_name",
-                        from
+                        **from
                     )
                     .fetch_all(pool)
                     .await?;

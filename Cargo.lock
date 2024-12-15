@@ -1824,6 +1824,7 @@ dependencies = [
  "env_logger",
  "futures",
  "ical",
+ "lazy_static",
  "log",
  "once_cell",
  "openapi",

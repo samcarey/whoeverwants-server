@@ -1,9 +1,11 @@
-use crate::{cleanup_expired_pending_actions, command::Command, get_pending_action_prompt};
+use crate::{
+    cleanup_expired_pending_actions, command::Command, get_pending_action_prompt, util::E164,
+};
 use anyhow::Result;
 use enum_iterator::all;
 use sqlx::{Pool, Sqlite};
 
-pub async fn handle_help(pool: &Pool<Sqlite>, from: &str) -> Result<String> {
+pub async fn handle_help(pool: &Pool<Sqlite>, from: &E164) -> Result<String> {
     cleanup_expired_pending_actions(pool).await?;
 
     let mut response = format!(
