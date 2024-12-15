@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use crate::{
     contacts::add_contact,
-    create_group,
+    create_group, get_pending_action_prompt,
     util::{parse_selections, ResponseBuilder, E164},
     Contact, GroupRecord,
 };
@@ -13,6 +13,11 @@ pub async fn handle_confirm(
     from: &str,
     selections: &str,
 ) -> anyhow::Result<String> {
+    if selections.is_empty() {
+        if let Some(pending_prompt) = get_pending_action_prompt(pool, from).await? {
+            return Ok(pending_prompt);
+        }
+    }
     let pending_action = query!(
         "SELECT action_type FROM pending_actions WHERE submitter_number = ?",
         from

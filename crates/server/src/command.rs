@@ -1,7 +1,6 @@
-use std::fmt::Display;
-
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 // variants must be all lowercase for serde_json to deserialize them
 #[allow(non_camel_case_types)]
@@ -66,8 +65,10 @@ impl Command {
                 description: "contact name to delete".to_string(),
             }),
             Self::confirm => Some(ParameterDoc {
-                example: "2,3".to_string(),
-                description: "number(s) from a list of pending actions".to_string(),
+                example: "1,2".to_string(),
+                description:
+                    "a comma-separated list of choices to confirm (based on a preceding list provided)"
+                        .to_string(),
             }),
             Self::stop => None,
             Self::contacts => None,
