@@ -46,11 +46,9 @@ pub async fn handle_group(pool: &Pool<Sqlite>, from: &str, names: &str) -> anyho
     tx.commit().await?;
 
     let mut response = ResponseBuilder::new();
-    response.add_section("Found these contacts", format_contact_list(&contacts, 0));
-    response.add_section(
-        "",
-        "To create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"".to_string(),
-    );
+    response.add_titled("Found these contacts", format_contact_list(&contacts, 0));
+    response
+        .add_section("To create a group with these contacts, reply \"confirm NUM1, NUM2, ...\"");
 
     Ok(response.build())
 }

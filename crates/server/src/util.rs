@@ -234,7 +234,14 @@ impl ResponseBuilder {
         }
     }
 
-    pub fn add_section(&mut self, title: &str, content: String) -> &mut Self {
+    pub fn add_section(&mut self, content: &str) -> &mut Self {
+        if !content.is_empty() {
+            self.sections.push(format!("\n{content}"));
+        }
+        self
+    }
+
+    pub fn add_titled(&mut self, title: &str, content: String) -> &mut Self {
         if !content.is_empty() {
             if !self.sections.is_empty() {
                 self.sections.push("\n".to_string());
@@ -246,7 +253,7 @@ impl ResponseBuilder {
 
     pub fn add_errors(&mut self, errors: &[String]) -> &mut Self {
         if !errors.is_empty() {
-            self.add_section("Errors", errors.join("\n"));
+            self.add_titled("Errors", errors.join("\n"));
         }
         self
     }
