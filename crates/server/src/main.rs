@@ -9,7 +9,7 @@ use confirm::ConfirmCommand;
 use contacts::process_contact_submission;
 use delete::DeleteCommand;
 use dotenv::dotenv;
-use group::handle_group;
+use group::GroupCommand;
 use help::handle_help;
 use log::*;
 use openapi::apis::{
@@ -292,16 +292,21 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
                 Err(error) => {
                     let mut response = ResponseBuilder::new();
                     response.add_errors(&[error.to_string()]);
+                    response.add_section(&Command::confirm.hint());
                     response.build()
                 }
             }
         }
         Command::group => {
             let names = words.collect::<Vec<_>>().join(" ");
-            if names.is_empty() {
-                Command::group.hint()
-            } else {
-                handle_group(pool, &from, &names).await?
+            match GroupCommand::from_str(&names) {
+                Ok(command) => command.handle(pool, &from).await?,
+                Err(error) => {
+                    let mut response = ResponseBuilder::new();
+                    response.add_errors(&[error.to_string()]);
+                    response.add_section(&Command::group.hint());
+                    response.build()
+                }
             }
         }
     };
