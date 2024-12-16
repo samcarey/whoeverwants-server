@@ -10,7 +10,7 @@ use contacts::process_contact_submission;
 use delete::DeleteCommand;
 use dotenv::dotenv;
 use group::GroupCommand;
-use help::handle_help;
+use help::HelpCommand;
 use info::InfoCommand;
 use log::*;
 use openapi::apis::{
@@ -169,7 +169,7 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
 
     let response = match command {
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
-        Command::h => handle_help(pool, &from).await?,
+        Command::h => HelpCommand.handle(pool, &from).await?,
         Command::name => match process_name(words) {
             Ok(name) => {
                 query!("update users set name = ? where number = ?", name, *from)
