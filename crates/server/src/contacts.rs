@@ -1,10 +1,86 @@
-use std::str::FromStr;
-
+use crate::{util::E164, CommandTrait, Contact, ImportResult};
 use anyhow::{bail, Result};
 use ical::parser::vcard::component::VcardContact;
-use sqlx::{query, Pool, Sqlite};
+use sqlx::{query, query_as, Pool, Sqlite};
+use std::str::FromStr;
 
-use crate::{util::E164, ImportResult};
+pub struct ContactsCommand;
+
+impl CommandTrait for ContactsCommand {
+    async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
+        // First get the groups
+        let groups = query!(
+            "SELECT g.name, COUNT(gm.member_number) as member_count 
+             FROM groups g 
+             LEFT JOIN group_members gm ON g.id = gm.group_id
+             WHERE g.creator_number = ?
+             GROUP BY g.id, g.name
+             ORDER BY g.name",
+            **from
+        )
+        .fetch_all(pool)
+        .await?;
+
+        // Then get the contacts
+        let contacts = query_as!(
+            Contact,
+            "SELECT id as \"id!\", contact_name, contact_user_number 
+             FROM contacts 
+             WHERE submitter_number = ? 
+             ORDER BY contact_name",
+            **from
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let response = if groups.is_empty() && contacts.is_empty() {
+            "You don't have any groups or contacts.".to_string()
+        } else {
+            let mut response = String::new();
+
+            // Add groups section if there are any
+            if !groups.is_empty() {
+                response.push_str("Your groups:\n");
+                for (i, group) in groups.iter().enumerate() {
+                    response.push_str(&format!(
+                        "{}. {} ({} members)\n",
+                        i + 1,
+                        group.name,
+                        group.member_count
+                    ));
+                }
+            }
+
+            // Add contacts section if there are any
+            if !contacts.is_empty() {
+                if !groups.is_empty() {
+                    response.push_str("\n"); // Add spacing between sections
+                }
+                response.push_str("Your contacts:\n");
+                let offset = groups.len(); // Start contact numbering after groups
+                response.push_str(
+                    &contacts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            format!(
+                                "{}. {} ({})",
+                                i + offset + 1,
+                                c.contact_name,
+                                &E164::from_str(&c.contact_user_number)
+                                    .expect("Should have been formatted upon db insertion")
+                                    .area_code()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            response
+        };
+        Ok(response)
+    }
+}
 
 pub async fn process_contact_submission(
     pool: &Pool<Sqlite>,

@@ -1,6 +1,7 @@
 use super::*;
 use contacts::process_vcard;
 use lazy_static::lazy_static;
+use sqlx::query_as;
 
 lazy_static! {
     static ref TEST_PHONE: E164 = "+12345678901".parse().unwrap();
