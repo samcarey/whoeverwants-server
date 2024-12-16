@@ -11,7 +11,7 @@ impl FromStr for DeleteCommand {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self {
-            name: NonEmptyString::from_str(s).map_err(|e| anyhow::format_err!("{e}"))?,
+            name: NonEmptyString::from_str(s.trim()).map_err(|e| anyhow::format_err!("{e}"))?,
         })
     }
 }

@@ -11,6 +11,7 @@ use delete::DeleteCommand;
 use dotenv::dotenv;
 use group::GroupCommand;
 use help::handle_help;
+use info::InfoCommand;
 use log::*;
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
@@ -28,6 +29,7 @@ mod db;
 mod delete;
 mod group;
 mod help;
+mod info;
 #[cfg(test)]
 mod test;
 mod util;
@@ -185,20 +187,15 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
             "You've been unsubscribed. Goodbye!".to_string()
         }
         Command::info => {
-            let command_text = words.next();
-            if let Some(command) = command_text.map(Command::try_from) {
-                if let Ok(command) = command {
-                    format!(
-                        "{}, to {}.{}",
-                        command.usage(),
-                        command.description(),
-                        command.example()
-                    )
-                } else {
-                    format!("Command \"{}\" not recognized", command_text.unwrap())
+            let command_text = words.next().unwrap_or_default();
+            match InfoCommand::from_str(command_text) {
+                Ok(command) => command.handle(pool, &from).await?,
+                Err(error) => {
+                    let mut response = ResponseBuilder::new();
+                    response.add_errors(&[error.to_string()]);
+                    response.add_section(&Command::info.hint());
+                    response.build()
                 }
-            } else {
-                Command::info.hint()
             }
         }
         Command::contacts => {
