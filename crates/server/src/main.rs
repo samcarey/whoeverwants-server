@@ -7,7 +7,7 @@ use axum::{
 };
 use confirm::ConfirmCommand;
 use contacts::process_contact_submission;
-use delete::handle_delete;
+use delete::DeleteCommand;
 use dotenv::dotenv;
 use group::handle_group;
 use help::handle_help;
@@ -275,10 +275,14 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
         }
         Command::delete => {
             let name = words.collect::<Vec<_>>().join(" ");
-            if name.is_empty() {
-                Command::delete.hint()
-            } else {
-                handle_delete(pool, &from, &name).await?
+            match DeleteCommand::from_str(&name) {
+                Ok(command) => command.handle(pool, &from).await?,
+                Err(error) => {
+                    let mut response = ResponseBuilder::new();
+                    response.add_errors(&[error.to_string()]);
+                    response.add_section(&Command::delete.hint());
+                    response.build()
+                }
             }
         }
         Command::confirm => {

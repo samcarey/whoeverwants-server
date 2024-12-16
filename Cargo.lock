@@ -424,6 +424,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "delegate"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "082a24a9967533dc5d743c602157637116fc1b52806d694a5a45e6f32567fcdd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "der"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1258,6 +1269,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "non-empty-string"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7c6b5dd693859a717623d1d11279f64ef97c27c423d8c5ba1703e0466df211b"
+dependencies = [
+ "delegate",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1826,6 +1846,7 @@ dependencies = [
  "ical",
  "lazy_static",
  "log",
+ "non-empty-string",
  "once_cell",
  "openapi",
  "rand",
