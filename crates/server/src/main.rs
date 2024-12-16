@@ -1,5 +1,5 @@
 use crate::command::Command;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use axum::{
     response::{Html, IntoResponse},
     routing::post,
@@ -13,6 +13,7 @@ use group::GroupCommand;
 use help::HelpCommand;
 use info::InfoCommand;
 use log::*;
+use name::{validate_name, NameCommand};
 use openapi::apis::{
     api20100401_message_api::{create_message, CreateMessageParams},
     configuration::Configuration,
@@ -30,6 +31,7 @@ mod delete;
 mod group;
 mod help;
 mod info;
+mod name;
 #[cfg(test)]
 mod test;
 mod util;
@@ -170,15 +172,18 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     let response = match command {
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
         Command::h => HelpCommand.handle(pool, &from).await?,
-        Command::name => match process_name(words) {
-            Ok(name) => {
-                query!("update users set name = ? where number = ?", name, *from)
-                    .execute(pool)
-                    .await?;
-                format!("Your name has been updated to \"{name}\"")
+        Command::name => {
+            let name = words.collect::<Vec<_>>().join(" ");
+            match NameCommand::from_str(&name) {
+                Ok(command) => command.handle(pool, &from).await?,
+                Err(error) => {
+                    let mut response = ResponseBuilder::new();
+                    response.add_errors(&[error.to_string()]);
+                    response.add_section(&Command::name.hint());
+                    response.build()
+                }
             }
-            Err(hint) => hint.to_string(),
-        },
+        }
         Command::stop => {
             query!("delete from users where number = ?", number)
                 .execute(pool)
@@ -334,7 +339,7 @@ async fn create_group(
 async fn onboard_new_user(
     command: Option<Result<Command, serde_json::Error>>,
     words: impl Iterator<Item = &str>,
-    from: &str,
+    from: &E164,
     pool: &Pool<Sqlite>,
 ) -> anyhow::Result<String> {
     let Some(Ok(Command::name)) = command else {
@@ -344,31 +349,20 @@ async fn onboard_new_user(
             Command::name.hint()
         ));
     };
-    Ok(match process_name(words) {
-        Ok(name) => {
-            query!("insert into users (number, name) values (?, ?)", from, name)
-                .execute(pool)
-                .await?;
+    let name = words.collect::<Vec<_>>().join(" ");
+    Ok(match validate_name(&name) {
+        Ok(()) => {
+            query!(
+                "insert into users (number, name) values (?, ?)",
+                **from,
+                name
+            )
+            .execute(pool)
+            .await?;
             format!("Hello, {name}! {}", Command::h.hint())
         }
         Err(hint) => hint.to_string(),
     })
-}
-
-fn process_name<'a>(words: impl Iterator<Item = &'a str>) -> Result<String> {
-    let name = words.collect::<Vec<_>>().join(" ");
-    if name.is_empty() {
-        bail!("{}", Command::name.usage());
-    }
-    const MAX_NAME_LEN: usize = 20;
-    if name.len() > MAX_NAME_LEN {
-        bail!(
-            "That name is {} characters long.\n\
-            Please shorten it to {MAX_NAME_LEN} characters or less.",
-            name.len()
-        );
-    }
-    Ok(name)
 }
 
 async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
