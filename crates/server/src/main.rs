@@ -7,6 +7,7 @@ use axum::{
 };
 use confirm::ConfirmCommand;
 use contacts::{process_contact_submission, ContactsCommand};
+use db::get_user;
 use delete::DeleteCommand;
 use dotenv::dotenv;
 use group::GroupCommand;
@@ -21,6 +22,7 @@ use openapi::apis::{
 use sqlx::{query, Pool, Sqlite};
 use std::env;
 use std::str::FromStr;
+use stop::StopCommand;
 use util::{ResponseBuilder, E164};
 
 mod command;
@@ -32,6 +34,7 @@ mod group;
 mod help;
 mod info;
 mod name;
+mod stop;
 #[cfg(test)]
 mod test;
 mod util;
@@ -103,7 +106,7 @@ enum ImportResult {
     Deferred,
 }
 
-trait CommandTrait {
+trait CommandTrait: FromStr {
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String>;
 }
 
@@ -148,19 +151,16 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     {
         return process_contact_submission(pool, &from, &media_url_0).await;
     }
-
     let mut words = body.trim().split_ascii_whitespace();
     let command_word = words.next();
     let command = command_word.map(Command::try_from);
-
-    let Some(User { number, .. }) = db::get_user(pool, &from).await? else {
+    if get_user(pool, &from).await?.is_none() {
         return onboard_new_user(command, words, &from, pool).await;
     };
-
+    let remaining = words.collect::<Vec<_>>().join(" ");
     let Some(command) = command else {
         return Ok(Command::h.hint());
     };
-
     let Ok(command) = command else {
         return Ok(format!(
             "We didn't recognize that command word: \"{}\".\n{}",
@@ -168,78 +168,56 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
             Command::h.hint()
         ));
     };
-
     let response = match command {
         // I would use HELP for the help command, but Twilio intercepts and does not relay that
         Command::h => HelpCommand.handle(pool, &from).await?,
-        Command::name => {
-            let name = words.collect::<Vec<_>>().join(" ");
-            match NameCommand::from_str(&name) {
-                Ok(command) => command.handle(pool, &from).await?,
-                Err(error) => {
-                    let mut response = ResponseBuilder::new();
-                    response.add_errors(&[error.to_string()]);
-                    response.add_section(&Command::name.hint());
-                    response.build()
-                }
+        Command::name => match NameCommand::from_str(&remaining) {
+            Ok(command) => command.handle(pool, &from).await?,
+            Err(error) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[error.to_string()]);
+                response.add_section(&Command::name.hint());
+                response.build()
             }
-        }
-        Command::stop => {
-            query!("delete from users where number = ?", number)
-                .execute(pool)
-                .await?;
-            // They won't actually see this when using Twilio
-            "You've been unsubscribed. Goodbye!".to_string()
-        }
-        Command::info => {
-            let command_text = words.next().unwrap_or_default();
-            match InfoCommand::from_str(command_text) {
-                Ok(command) => command.handle(pool, &from).await?,
-                Err(error) => {
-                    let mut response = ResponseBuilder::new();
-                    response.add_errors(&[error.to_string()]);
-                    response.add_section(&Command::info.hint());
-                    response.build()
-                }
+        },
+        Command::stop => StopCommand.handle(pool, &from).await?,
+        Command::info => match InfoCommand::from_str(&remaining) {
+            Ok(command) => command.handle(pool, &from).await?,
+            Err(error) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[error.to_string()]);
+                response.add_section(&Command::info.hint());
+                response.build()
             }
-        }
+        },
         Command::contacts => ContactsCommand.handle(pool, &from).await?,
-        Command::delete => {
-            let name = words.collect::<Vec<_>>().join(" ");
-            match DeleteCommand::from_str(&name) {
-                Ok(command) => command.handle(pool, &from).await?,
-                Err(error) => {
-                    let mut response = ResponseBuilder::new();
-                    response.add_errors(&[error.to_string()]);
-                    response.add_section(&Command::delete.hint());
-                    response.build()
-                }
+        Command::delete => match DeleteCommand::from_str(&remaining) {
+            Ok(command) => command.handle(pool, &from).await?,
+            Err(error) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[error.to_string()]);
+                response.add_section(&Command::delete.hint());
+                response.build()
             }
-        }
-        Command::confirm => {
-            let nums = words.collect::<Vec<_>>().join(" ");
-            match ConfirmCommand::from_str(&nums) {
-                Ok(command) => command.handle(pool, &from).await?,
-                Err(error) => {
-                    let mut response = ResponseBuilder::new();
-                    response.add_errors(&[error.to_string()]);
-                    response.add_section(&Command::confirm.hint());
-                    response.build()
-                }
+        },
+        Command::confirm => match ConfirmCommand::from_str(&remaining) {
+            Ok(command) => command.handle(pool, &from).await?,
+            Err(error) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[error.to_string()]);
+                response.add_section(&Command::confirm.hint());
+                response.build()
             }
-        }
-        Command::group => {
-            let names = words.collect::<Vec<_>>().join(" ");
-            match GroupCommand::from_str(&names) {
-                Ok(command) => command.handle(pool, &from).await?,
-                Err(error) => {
-                    let mut response = ResponseBuilder::new();
-                    response.add_errors(&[error.to_string()]);
-                    response.add_section(&Command::group.hint());
-                    response.build()
-                }
+        },
+        Command::group => match GroupCommand::from_str(&remaining) {
+            Ok(command) => command.handle(pool, &from).await?,
+            Err(error) => {
+                let mut response = ResponseBuilder::new();
+                response.add_errors(&[error.to_string()]);
+                response.add_section(&Command::group.hint());
+                response.build()
             }
-        }
+        },
     };
     Ok(response)
 }

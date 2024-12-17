@@ -6,6 +6,13 @@ use std::str::FromStr;
 
 pub struct ContactsCommand;
 
+impl FromStr for ContactsCommand {
+    type Err = anyhow::Error;
+    fn from_str(_: &str) -> Result<Self, Self::Err> {
+        Ok(Self)
+    }
+}
+
 impl CommandTrait for ContactsCommand {
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         // First get the groups

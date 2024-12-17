@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::{
     cleanup_expired_pending_actions, command::Command, get_pending_action_prompt, util::E164,
     CommandTrait,
@@ -6,6 +8,13 @@ use enum_iterator::all;
 use sqlx::{Pool, Sqlite};
 
 pub struct HelpCommand;
+
+impl FromStr for HelpCommand {
+    type Err = anyhow::Error;
+    fn from_str(_: &str) -> Result<Self, Self::Err> {
+        Ok(Self)
+    }
+}
 
 impl CommandTrait for HelpCommand {
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
