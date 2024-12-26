@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whoever Wants...</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+
+        .container {
+            text-align: center;
+            padding-top: 2rem;
+        }
+
+        .text-container {
+            font-size: 2rem;
+            height: 3rem;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .static-text {
+            display: inline;
+        }
+
+        .dynamic-text {
+            display: inline-block;
+            position: relative;
+            color: #2563eb;
+        }
+
+        .phrase {
+            position: absolute;
+            width: 100%;
+            opacity: 0;
+            animation: scroll-text 12s infinite;
+            left: 0;
+        }
+
+        @keyframes scroll-text {
+            0%, 16% {
+                opacity: 0;
+                transform: translateY(100%);
+            }
+            20%, 36% {
+                opacity: 1;
+                transform: translateY(0);
+            }
+            40%, 100% {
+                opacity: 0;
+                transform: translateY(-100%);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="text-container">
+            <div class="static-text">Whoever wants </div>
+            <div class="dynamic-text">
+                <span class="phrase" style="animation-delay: 0s;">pizza</span>
+                <span class="phrase" style="animation-delay: 4s;">to party</span>
+                <span class="phrase" style="animation-delay: 8s;">to see a movie</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
