@@ -14,6 +14,15 @@ impl FromStr for ContactsCommand {
 }
 
 impl CommandTrait for ContactsCommand {
+    fn word() -> &'static str {
+        "contacts"
+    }
+    fn description() -> &'static str {
+        "see a list of your groups and contacts"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        None
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         // First get the groups
         let groups = query!(

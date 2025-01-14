@@ -1,4 +1,4 @@
-use crate::{command::Command, util::E164, CommandTrait};
+use crate::{command::Command, util::E164, CommandTrait, ParameterDoc};
 use anyhow::{bail, Result};
 use non_empty_string::NonEmptyString;
 use sqlx::{query, Pool, Sqlite};
@@ -18,6 +18,18 @@ impl FromStr for NameCommand {
 }
 
 impl CommandTrait for NameCommand {
+    fn word() -> &'static str {
+        "name"
+    }
+    fn description() -> &'static str {
+        "set your preferred name"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        Some(ParameterDoc {
+            example: "John S.".to_string(),
+            description: "your name".to_string(),
+        })
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         let Self { name } = self;
         validate_name(&name.to_string())?;

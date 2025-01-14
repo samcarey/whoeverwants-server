@@ -1,4 +1,4 @@
-use crate::{set_pending_action, util::E164, CommandTrait, Contact, GroupRecord};
+use crate::{set_pending_action, util::E164, CommandTrait, Contact, GroupRecord, ParameterDoc};
 use non_empty_string::NonEmptyString;
 use sqlx::{query, query_as, Pool, Sqlite};
 use std::str::FromStr;
@@ -17,6 +17,18 @@ impl FromStr for DeleteCommand {
 }
 
 impl CommandTrait for DeleteCommand {
+    fn word() -> &'static str {
+        "delete"
+    }
+    fn description() -> &'static str {
+        "delete a contact by name"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        Some(ParameterDoc {
+            example: "John".to_string(),
+            description: "contact name to delete".to_string(),
+        })
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         let Self { name } = self;
         let like = format!("%{}%", name.to_string().to_lowercase());

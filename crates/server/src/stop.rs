@@ -14,6 +14,15 @@ impl FromStr for StopCommand {
 }
 
 impl CommandTrait for StopCommand {
+    fn word() -> &'static str {
+        "stop"
+    }
+    fn description() -> &'static str {
+        "stop receiving messages and remove yourself from the database"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        None
+    }
     async fn handle(
         &self,
         pool: &sqlx::Pool<sqlx::Sqlite>,

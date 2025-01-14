@@ -2,7 +2,7 @@ use crate::{
     db::get_contacts_by_name,
     set_pending_action,
     util::{format_contact_list, ResponseBuilder, E164},
-    CommandTrait,
+    CommandTrait, ParameterDoc,
 };
 use sqlx::{query, Pool, Sqlite};
 use std::str::FromStr;
@@ -25,6 +25,18 @@ impl FromStr for GroupCommand {
 }
 
 impl CommandTrait for GroupCommand {
+    fn word() -> &'static str {
+        "group"
+    }
+    fn description() -> &'static str {
+        "create a new group from your contacts"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        Some(ParameterDoc {
+            example: "John, Alice".to_string(),
+            description: "comma-separated list of contact name fragments".to_string(),
+        })
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         let Self { name_fragments } = self;
 

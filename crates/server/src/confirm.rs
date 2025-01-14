@@ -4,7 +4,7 @@ use crate::{
     contacts::add_contact,
     create_group, get_pending_action_prompt,
     util::{parse_selections, ResponseBuilder, Selection, E164},
-    CommandTrait, Contact, GroupRecord,
+    CommandTrait, Contact, GroupRecord, ParameterDoc,
 };
 use sqlx::{query, query_as, Pool, Sqlite};
 
@@ -22,6 +22,20 @@ impl FromStr for ConfirmCommand {
 }
 
 impl CommandTrait for ConfirmCommand {
+    fn word() -> &'static str {
+        "confirm"
+    }
+    fn description() -> &'static str {
+        "confirm pending actions"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        Some(ParameterDoc {
+            example: "1,2".to_string(),
+            description:
+                "a comma-separated list of choices to confirm (based on a preceding list provided)"
+                    .to_string(),
+        })
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         let Self { selections } = self;
         if selections.is_empty() {

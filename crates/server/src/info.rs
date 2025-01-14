@@ -1,4 +1,4 @@
-use crate::{command::Command, util::E164, CommandTrait};
+use crate::{command::Command, util::E164, CommandTrait, ParameterDoc};
 use non_empty_string::NonEmptyString;
 use sqlx::{Pool, Sqlite};
 use std::str::FromStr;
@@ -17,14 +17,26 @@ impl FromStr for InfoCommand {
 }
 
 impl CommandTrait for InfoCommand {
+    fn word() -> &'static str {
+        "info"
+    }
+    fn description() -> &'static str {
+        "see information about a command"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        Some(ParameterDoc {
+            example: Command::name.to_string(),
+            description: "a command".to_string(),
+        })
+    }
     async fn handle(&self, _: &Pool<Sqlite>, _: &E164) -> anyhow::Result<String> {
         let Self { query } = self;
         Ok(if let Ok(command) = Command::try_from(query.as_str()) {
             format!(
                 "{}, to {}.{}",
-                command.usage(),
-                command.description(),
-                command.example()
+                Self::usage(),
+                Self::description(),
+                Self::example()
             )
         } else {
             format!("Command \"{}\" not recognized", query)

@@ -20,8 +20,8 @@ use openapi::apis::{
     configuration::Configuration,
 };
 use sqlx::{query, Pool, Sqlite};
-use std::env;
-use std::str::FromStr;
+use std::{env, fmt::Display, marker::PhantomData};
+use std::{fmt::Debug, str::FromStr};
 use stop::StopCommand;
 use util::{ResponseBuilder, E164};
 
@@ -106,8 +106,50 @@ enum ImportResult {
     Deferred,
 }
 
+struct ParameterDoc {
+    example: String,
+    description: String,
+}
+
 trait CommandTrait: FromStr {
+    fn word() -> &'static str;
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String>;
+    fn description() -> &'static str;
+    fn parameter_doc() -> Option<ParameterDoc>;
+    fn usage() -> String {
+        let word = Self::word();
+        if let Some(ParameterDoc { description, .. }) = Self::parameter_doc() {
+            format!("Reply \"{word} X\", where X is {description}")
+        } else {
+            format!("Reply \"{word}\"")
+        }
+    }
+    fn example() -> String {
+        let word = Self::word();
+        Self::parameter_doc()
+            .map(|ParameterDoc { example, .. }| format!("\nExample: \"{word} {example}\""))
+            .unwrap_or_default()
+    }
+    fn hint() -> String {
+        format!(
+            "{}, to {}.{}",
+            Self::usage(),
+            Self::description(),
+            Self::example()
+        )
+    }
+    fn from_message(s: &str) -> Option<Result<Self, <Self as FromStr>::Err>> {
+        let mut words = s.split_ascii_whitespace();
+        let matches = words
+            .next()
+            .map(|w| w.to_lowercase())
+            .is_some_and(|w| w == Self::word());
+        if matches {
+            Some(Self::from_str(&words.collect::<Vec<_>>().join(" ")))
+        } else {
+            None
+        }
+    }
 }
 
 // Handler for incoming SMS messages
@@ -133,6 +175,12 @@ async fn handle_incoming_sms(
     ))
 }
 
+struct CommandWrapper<T>(PhantomData<T>);
+
+// fn parse_command(s: &str) -> Result<Box<dyn Command>> {
+//     for command
+// }
+
 async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Result<String> {
     trace!("Received {message:?}");
     let SmsMessage {
@@ -151,13 +199,14 @@ async fn process_message(pool: &Pool<Sqlite>, message: SmsMessage) -> anyhow::Re
     {
         return process_contact_submission(pool, &from, &media_url_0).await;
     }
+    // let command =
     let mut words = body.trim().split_ascii_whitespace();
     let command_word = words.next();
     let command = command_word.map(Command::try_from);
-    if get_user(pool, &from).await?.is_none() {
-        return onboard_new_user(command, words, &from, pool).await;
-    };
     let remaining = words.collect::<Vec<_>>().join(" ");
+    if get_user(pool, &from).await?.is_none() {
+        return onboard_new_user(command, &remaining, &from, pool).await;
+    };
     let Some(command) = command else {
         return Ok(Command::h.hint());
     };
@@ -316,7 +365,7 @@ async fn create_group(
 
 async fn onboard_new_user(
     command: Option<Result<Command, serde_json::Error>>,
-    words: impl Iterator<Item = &str>,
+    name: &str,
     from: &E164,
     pool: &Pool<Sqlite>,
 ) -> anyhow::Result<String> {
@@ -327,7 +376,6 @@ async fn onboard_new_user(
             Command::name.hint()
         ));
     };
-    let name = words.collect::<Vec<_>>().join(" ");
     Ok(match validate_name(&name) {
         Ok(()) => {
             query!(

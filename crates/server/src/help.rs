@@ -17,6 +17,15 @@ impl FromStr for HelpCommand {
 }
 
 impl CommandTrait for HelpCommand {
+    fn word() -> &'static str {
+        "help"
+    }
+    fn description() -> &'static str {
+        "show a list of available commands and any pending actions"
+    }
+    fn parameter_doc() -> Option<crate::ParameterDoc> {
+        None
+    }
     async fn handle(&self, pool: &Pool<Sqlite>, from: &E164) -> anyhow::Result<String> {
         cleanup_expired_pending_actions(pool).await?;
 
