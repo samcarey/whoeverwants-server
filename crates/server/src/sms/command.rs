@@ -1,13 +1,12 @@
-use std::str::FromStr;
-
+use super::{help::get_pending_action_prompt, CommandWord};
 use crate::{
-    cleanup_expired_pending_actions, command_word::CommandWord, contacts::add_contact,
-    create_group, help::get_pending_action_prompt, set_pending_action, util::E164, Contact,
-    GroupRecord,
+    cleanup_expired_pending_actions, contacts::add_contact, create_group, set_pending_action,
+    util::E164, Contact, GroupRecord,
 };
 use anyhow::{bail, Context};
 use enum_iterator::all;
 use sqlx::{query, query_as, Pool, Sqlite};
+use std::str::FromStr;
 
 pub enum Command {
     Help,

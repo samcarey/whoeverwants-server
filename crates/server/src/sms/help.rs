@@ -1,8 +1,7 @@
-use std::str::FromStr;
-
 use crate::util::E164;
 use anyhow::Result;
 use sqlx::{query, Pool, Sqlite};
+use std::str::FromStr;
 
 pub async fn get_pending_action_prompt(pool: &Pool<Sqlite>, from: &str) -> Result<Option<String>> {
     let pending = query!(

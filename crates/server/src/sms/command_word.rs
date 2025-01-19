@@ -1,7 +1,6 @@
-use std::fmt::Display;
-
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 
 // variants must be all lowercase for serde_json to deserialize them
 #[allow(non_camel_case_types)]

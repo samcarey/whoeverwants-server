@@ -1,6 +1,6 @@
-use contacts::process_vcard;
-
 use super::*;
+use crate::Contact;
+use contacts::{process_vcard, ImportResult};
 
 async fn setup_db(pool: &Pool<Sqlite>) -> Result<()> {
     query!("PRAGMA foreign_keys = ON").execute(pool).await?;
