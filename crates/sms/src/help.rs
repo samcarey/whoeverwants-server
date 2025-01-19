@@ -1,5 +1,5 @@
-use crate::util::E164;
 use anyhow::Result;
+use shared::util::E164;
 use sqlx::{query, Pool, Sqlite};
 use std::str::FromStr;
 

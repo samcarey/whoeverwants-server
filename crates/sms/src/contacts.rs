@@ -1,8 +1,9 @@
-use crate::{contacts::add_contact, util::E164};
+use std::str::FromStr;
+
 use anyhow::{bail, Result};
 use ical::parser::vcard::component::VcardContact;
+use shared::{contacts::add_contact, util::E164};
 use sqlx::{query, Pool, Sqlite};
-use std::str::FromStr;
 
 pub async fn process_contact_submission(
     pool: &Pool<Sqlite>,

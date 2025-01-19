@@ -1,10 +1,10 @@
 use super::{help::get_pending_action_prompt, CommandWord};
 use crate::{
-    cleanup_expired_pending_actions, contacts::add_contact, create_group, set_pending_action,
-    util::E164, Contact, GroupRecord,
+    cleanup_expired_pending_actions, create_group, set_pending_action, Contact, GroupRecord,
 };
 use anyhow::{bail, Context};
 use enum_iterator::all;
+use shared::{contacts::add_contact, util::E164};
 use sqlx::{query, query_as, Pool, Sqlite};
 use std::str::FromStr;
 

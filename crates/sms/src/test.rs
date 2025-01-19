@@ -19,7 +19,7 @@ async fn send_message(pool: &Pool<Sqlite>, from: &str, body: &str) -> Result<Str
     .await
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_new_user_registration(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -55,7 +55,7 @@ async fn test_new_user_registration(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_help_and_info_commands(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -83,7 +83,7 @@ async fn test_help_and_info_commands(pool: Pool<Sqlite>) -> Result<()> {
 
     Ok(())
 }
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -123,7 +123,7 @@ async fn test_contact_management(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_malformed_vcard(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -144,7 +144,7 @@ async fn test_malformed_vcard(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_user_deletion(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -184,7 +184,7 @@ async fn test_user_deletion(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_contact_updates(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -213,7 +213,7 @@ async fn test_contact_updates(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_add_contacts_before_registration(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -240,7 +240,7 @@ async fn test_add_contacts_before_registration(pool: Pool<Sqlite>) -> Result<()>
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_multi_number_contact_selection(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
@@ -339,7 +339,7 @@ async fn test_multi_number_contact_selection(pool: Pool<Sqlite>) -> Result<()> {
     Ok(())
 }
 
-#[sqlx::test]
+#[sqlx::test(migrations = "../server/migrations")]
 async fn test_group_deletion(pool: Pool<Sqlite>) -> Result<()> {
     setup_db(&pool).await?;
 
