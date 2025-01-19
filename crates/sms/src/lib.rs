@@ -25,6 +25,22 @@ mod help;
 #[cfg(test)]
 mod test;
 
+pub async fn init_sms() -> Result<()> {
+    let twilio_config = Configuration {
+        basic_auth: Some((
+            env::var("TWILIO_API_KEY_SID")?,
+            Some(env::var("TWILIO_API_KEY_SECRET")?),
+        )),
+        ..Default::default()
+    };
+    send(
+        &twilio_config,
+        env::var("CLIENT_NUMBER")?,
+        "Server is starting up".to_string(),
+    )
+    .await
+}
+
 pub async fn handle_incoming_sms(
     Extension(pool): Extension<Pool<Sqlite>>,
     Form(message): Form<SmsMessage>,
@@ -247,7 +263,7 @@ async fn create_group(
     Ok(response)
 }
 
-pub async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
+async fn send(twilio_config: &Configuration, to: String, message: String) -> Result<()> {
     let message_params = CreateMessageParams {
         account_sid: env::var("TWILIO_ACCOUNT_SID")?,
         to,
