@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let pool = sqlx::SqlitePool::connect(&env::var("DATABASE_URL")?).await?;
     query!("PRAGMA foreign_keys = ON").execute(&pool).await?; // SQLite has this off by default
     let app = Router::new()
-        .route("/", post(handle_incoming_sms))
+        .route("/sms", post(handle_incoming_sms))
         .layer(Extension(pool));
     let listener = tokio::net::TcpListener::bind(format!(
         "{}:{}",
